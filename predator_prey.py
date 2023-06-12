@@ -18,6 +18,19 @@ config.update("jax_enable_x64", True)
 
 N_PARAM = 8
 
+import arviz
+import matplotlib.pyplot as plt
+
+import diffrax
+
+def plots(samples, time, prey, pred):
+    arviz.plot_pair(
+        samples,
+        marginals=True,
+        figsize=(12, 8)
+    )   
+    return None
+
 def main(args):
 
     print("Loading predator-prey data...")
@@ -30,12 +43,14 @@ def main(args):
     )
 
     [n_warm, n_iter] = args.sampling_param
-    schedule = optax.exponential_decay(init_value=1e-3,
+    schedule = optax.exponential_decay(init_value=1e-4,
         transition_steps=n_warm-10, decay_rate=.1, transition_begin=10)
     optim = optax.adam(schedule)
 
-    run(dist, args, optim, N_PARAM, batch_fn=jax.vmap)
-
+    particles, samples, *_ = run(dist, args, optim, N_PARAM, batch_fn=jax.vmap)
+    plots(particles)
+    plots(samples)
+    plt.show()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -12,7 +12,7 @@ def taylor_run(dist, args, flow, optim, N_PARAM, batch_fn=jax.vmap):
     kflow, ksam, kinit = jax.random.split(jax.random.PRNGKey(args.seed), 3)
     dist.initialize_model(kinit, batch_iter * batch_size)
 
-    init_param, flow, reverse, forward = initialize_flow(
+    init_param, flow, flow_inv, reverse, forward = initialize_flow(
         kflow, N_PARAM, dist.logprob_fn, flow)
 
     one_init_param = jax.tree_map(lambda p: p[0], dist.init_params)
@@ -25,6 +25,8 @@ def taylor_run(dist, args, flow, optim, N_PARAM, batch_fn=jax.vmap):
     samples, param = run_tess(ksam, dist.logprob_fn, dist.init_params,
         n_warm, n_iter, precond_param, optim, flow, forward, 
         batch_iter, batch_size, args.max_iter, batch_fn)
+    
+    return samples, param, flow, flow_inv
 
 
 def initialize_flow(rng_key, d, logprob_fn, flow, distance=kullback_liebler):
@@ -33,4 +35,4 @@ def initialize_flow(rng_key, d, logprob_fn, flow, distance=kullback_liebler):
     reverse, forward = distance(logprob_fn, flow, flow_inv)
     init_param = param_init(rng_key, jax.random.normal(rng_key, shape=(d,)))
 
-    return init_param, flow, reverse, forward
+    return init_param, flow, flow_inv, reverse, forward

@@ -16,6 +16,7 @@ from mcmc_utils import inference_loop0, stein_disc, autocorrelation
 
 from blackjax.mcmc.tess import tess
 from blackjax.adaptation.atess import atess, optimize
+from blackjax.vi.svgd import coin_svgd, svgd, update_median_heuristic
 
 
 def do_summary(samples, logprob_fn, sec):
@@ -72,18 +73,17 @@ def run(dist, args, optim, N_PARAM, batch_fn=jax.vmap):
     precond_param = run_precondition(kflow, init_param, one_init_param, 
         optim, reverse, mc_samples, precond_iter)
     
-    print("Pre-flow")
-    test_flow(kflow, dist, flow, batch_size * batch_iter, n_iter, precond_param, one_init_param)
-
     print("TESS w/ precond.")
     samples, param = run_tess(ksam, dist.logprob_fn, dist.init_params,
         n_warm, n_iter, precond_param, optim, flow, forward, 
         batch_iter, batch_size, args.max_iter, batch_fn)
 
-    print("Post-flow")
-    test_flow(kflow, dist, flow, batch_size * batch_iter, n_iter, param, one_init_param)
+    print("SVGD")
+    dist.initialize_model(kinit, 1 * n_iter)
+    push_param = jax.tree_util.tree_map(lambda p: flow(p, param), dist.init_params)
+    particles = run_svgd(dist.logprob_fn, push_param, n_warm, n_iter, 1, optim)
 
-    return None
+    return particles, samples, param, flow, flow_inv
 
 
 non_lins = {
@@ -191,3 +191,29 @@ def run_tess(
     do_summary(samples, logprob_fn, sec)
     print("Runtime for TESS", (tic2 - tic1).total_seconds())
     return samples, param
+
+
+def inference_loop_svgd(init_state, step, n_iter):
+    def one_iter(state, _):
+        state = step(state)
+        return state, state
+    state, _ = jax.lax.scan(one_iter, init_state, jax.numpy.arange(n_iter))
+    return state
+
+def run_svgd(logprob_fn, init_position, n_warm, n_iter, batch_shape, optim):
+    tic1 = pd.Timestamp.now()
+    if optim is not None:
+        init, step = svgd(jax.grad(logprob_fn), optim)
+    else:
+        init, step = coin_svgd(jax.grad(logprob_fn))
+    init_state = init(init_position)
+    init_state = update_median_heuristic(init_state)
+    state = inference_loop_svgd(init_state, step, n_warm + n_iter)
+    particles = state.particles
+    tic2 = pd.Timestamp.now()
+
+    sec = (tic2 - tic1).total_seconds()
+    particles = jax.tree_util.tree_map(lambda p: p.reshape((batch_shape, n_iter) + p.shape[1:]), particles)
+    do_summary(particles, logprob_fn, sec)
+    print("Runtime for SVGD", (tic2 - tic1).total_seconds())
+    return particles

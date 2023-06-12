@@ -144,6 +144,7 @@ class ProbitReg(Distribution):
         }
 
 
+from jax.experimental.ode import odeint
 class PredatorPrey:
     def __init__(self, 
         time,
@@ -164,16 +165,22 @@ class PredatorPrey:
             ),
         )
 
+        N = self.time.shape[0]
+        # ts = jnp.arange(float(N))
+        # z = odeint(dz_dt, z_init, ts, theta, rtol=1e-6, atol=1e-5, mxstep=1000)
+        
         term = diffrax.ODETerm(dz_dt)
-        # solver = diffrax.Dopri5()
+        solver = diffrax.Dopri5()
         # solver = diffrax.Tsit5()
         # solver = diffrax.Dopri8()
-        solver = diffrax.Heun()
+        # solver = diffrax.Heun()
+        saveat = diffrax.SaveAt(ts=[i+1 for i in range(N)])
         z = diffrax.diffeqsolve(
             term, solver, 
-            t0=0, t1=self.time.shape[0], dt0=1, 
+            t0=0, t1=N, dt0=1.,
             stepsize_controller=diffrax.PIDController(rtol=1e-6, atol=1e-5),
             y0=z_init, args=theta,
+            saveat=saveat,
             max_steps=1000,
             throw=False,
         ).ys

@@ -4,14 +4,80 @@ import pandas as pd
 import numpy as np
 
 import jax
+import jax.numpy as jnp
 import optax
+import distrax as dx
+import haiku as hk
 
 from distributions import HorseshoeLogisticReg, ProbitReg
 from execute import run
+from exe import taylor_run
+from flows import Flow, RealSufficient, PositiveSufficient, make_cond
 
 from jax.config import config
 # config.update("jax_debug_nans", True)
 config.update("jax_enable_x64", True)
+
+from jax.experimental.host_callback import id_print
+
+class HorseshoeSufficient(hk.Module):
+    def __call__(self, log_input):
+        log_x = log_input[:-1] + log_input[-1]
+        logfirst = log_x
+        nfirst = -jax.numpy.exp(log_x)
+        nsecond = -jax.numpy.exp(log_x)**2
+        nthird = -jax.numpy.exp(log_x)**3
+        reg = jax.numpy.vstack([logfirst, nfirst, nsecond, nthird])
+        reg = ((reg - reg.mean(axis=0)) / reg.std(axis=0)).T
+        return reg
+
+class Message(Flow):
+
+    def __init__(self, y, X, num_bins=False, hidden_dims=0, non_linearity=None): 
+        super().__init__(num_bins, hidden_dims, non_linearity)
+        self.y = y
+        self.X = X
+        _, j = X.shape
+        d = j * 2 + 1
+        false = [False] * j
+        true = [True] * j
+        self.tau_mask = np.array(true + true + [False])
+        self.lambda_mask = np.array(true + false + [True])
+        self.beta_mask = np.array(false + true + [True])
+        self.d = d
+        self.j = j
+
+    def flows(self):
+        flows = []
+        tau_prior_layer = PositiveSufficient(axis=None, transform=lambda _: jnp.log(1))
+        tau_prior = make_cond(self.d, tau_prior_layer, self)
+        flows.append(dx.MaskedCoupling(self.tau_mask, tau_prior, self.coupling_fn))
+        
+        lambda_prior_layer = PositiveSufficient(axis=None, transform=lambda _: jnp.log(1))        
+        lambda_prior = make_cond(self.d, lambda_prior_layer, self)
+        flows.append(dx.MaskedCoupling(self.lambda_mask, lambda_prior, self.coupling_fn))
+        
+        lambda_tau = lambda log_x: jnp.atleast_2d(log_x[:-1] + log_x[-1])
+        beta_prior_layer = PositiveSufficient(axis=0, transform=lambda_tau)
+        beta_prior = make_cond(self.j, beta_prior_layer, self, batch=True)
+        flows.append(dx.SplitCoupling(self.j, 1, beta_prior, self.coupling_fn, swap=True))
+
+        #what is the best use for the first moment? OLS?
+        data = lambda _: self.y * self.X.T
+        beta_lik_layer = RealSufficient(axis=1, transform=data)
+        beta_lik = make_cond(self.j, beta_lik_layer, self, batch=True)
+        flows.append(dx.SplitCoupling(self.j, 1, beta_lik, self.coupling_fn, swap=True))
+
+        beta = lambda x: jnp.atleast_2d(jnp.concatenate([x[:self.j], x[:self.j], x[:1]]))
+        lambda_lik_layer = RealSufficient(axis=0, transform=beta)
+        lambda_lik = make_cond(self.d, lambda_lik_layer, self, batch=True)
+        flows.append(dx.MaskedCoupling(self.lambda_mask, lambda_lik, self.coupling_fn))
+
+        tau_lik_layer = RealSufficient(axis=None, transform=beta)
+        tau_lik = make_cond(self.d, tau_lik_layer, self)
+        flows.append(dx.MaskedCoupling(self.tau_mask, tau_lik, self.coupling_fn))
+
+        return dx.Chain(flows)
 
 
 def main(args):
@@ -34,7 +100,10 @@ def main(args):
     print("\n\nSetting up German credit logistic horseshoe model...")
     dist = HorseshoeLogisticReg(X, y)
 
-    run(dist, args, optim, N_PARAM, batch_fn=jax.vmap)
+    # run(dist, args, optim, N_PARAM, batch_fn=jax.vmap)
+
+    flow = Message(y, X)
+    taylor_run(dist, args, flow, optim, N_PARAM, jax.vmap)
 
 
 if __name__ == "__main__":

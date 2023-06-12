@@ -115,7 +115,6 @@ def tess_proposal(
             theta_min = jnp.where(theta < 0, theta, theta_min)
             theta_max = jnp.where(theta > 0, theta, theta_max)
             subiter += 1
-            id_print(subiter)
             return rng, slice, subiter, theta, theta_min, theta_max, u, m
 
         _, slice, subiter, theta, *_, u, m = jax.lax.while_loop(

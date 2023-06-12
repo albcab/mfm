@@ -1,20 +1,21 @@
 import abc
-from typing import Callable
+from typing import Callable, Optional
 
+import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
-
+from jax.experimental.host_callback import id_print
 
 import haiku as hk
 import distrax as dx
 
 
 def affine_coupling(params):
-    return dx.ScalarAffine(shift=params[0], log_scale=params[1])
+    return dx.ScalarAffine(shift=params[:, 0], log_scale=params[:, 1])
 
 def rquad_spline_coupling(params):
     return dx.RationalQuadraticSpline(
-        params, range_min=-6., range_max=6.)
+        params, range_min=-3., range_max=3.)
 
         
 def make_dense(d, hidden_dims, norm, non_linearity, num_bins):
@@ -31,12 +32,81 @@ def make_dense(d, hidden_dims, norm, non_linearity, num_bins):
     else:
         layers.extend([
             hk.Linear(2 * d, w_init=hk.initializers.VarianceScaling(.01), b_init=hk.initializers.RandomNormal(.01)),
-            hk.Reshape((2, d), preserve_dims=-1)
+            hk.Reshape((d, 2), preserve_dims=-1)
         ])
     return hk.Sequential(layers)
 
 
+def make_cond(out_dim, first_layer, self, batch=False):
+    layers = [first_layer]
+    n_param = 3 * self.num_bins + 1 if self.num_bins else 2
+    for _ in range(self.hidden_dims):
+        layers.append(hk.Linear(n_param * out_dim))
+        layers.append(self.non_linearity)
+    if batch:
+        layers.append(BatchLinear(n_param))
+    else:
+        layers.append(hk.Linear(n_param * out_dim))
+        layers.append(hk.Reshape((out_dim, n_param), preserve_dims=-1))
+    return hk.Sequential(layers)
+
+
+class BatchLinear(hk.Module):
+    def __init__(self, n_param, name=None):
+        super().__init__(name)
+        self.n_param = n_param
+
+    def __call__(self, x):
+        return jax.vmap(lambda x: hk.Linear(self.n_param)(x))(x)
+
+
+class Sufficient(hk.Module):
+    def __init__(self, transform, axis=None, name=None):
+        super().__init__(name)
+        self.axis = axis
+        self.transform = transform
+
+class RealSufficient(Sufficient):
+    def __call__(self, x):
+        x = self.transform(x)
+        x = (x - x.mean()) / x.std()
+        return x
+        first = jnp.sum(x, axis=self.axis)
+        second = jnp.sum(x**2, axis=self.axis)
+        third = jnp.sum(x**3, axis=self.axis)
+        fourth = jnp.sum(x**4, axis=self.axis)
+        reg = jnp.array([first, second, third, fourth])
+        if self.axis is not None:
+            reg = ((reg - reg.mean(axis=0)) / reg.std(axis=0)).T
+        else:
+            reg = (reg - reg.mean()) / reg.std()
+        return reg
+
+class PositiveSufficient(Sufficient):
+    def __call__(self, log_x):
+        log_x = self.transform(log_x)
+        logfirst = jnp.sum(log_x, axis=self.axis)
+        nfirst = jnp.sum(-jnp.exp(log_x), axis=self.axis)
+        nsecond = jnp.sum(-jnp.exp(log_x)**2, axis=self.axis)
+        nthird = jnp.sum(-jnp.exp(log_x)**3, axis=self.axis)
+        reg = jnp.array([logfirst, nfirst, nsecond, nthird])
+        if self.axis is not None:
+            reg = ((reg - reg.mean(axis=0)) / reg.std(axis=0)).T
+        else:
+            reg = (reg - reg.mean()) / reg.std()
+        return reg
+
+
 class Flow(metaclass=abc.ABCMeta):
+
+    def __init__(self, num_bins, hidden_dims, non_linearity):
+        if num_bins:
+            self.coupling_fn = affine_coupling
+        else:
+            self.coupling_fn = affine_coupling
+        self.num_bins = num_bins
+        self.hidden_dims = hidden_dims
+        self.non_linearity = non_linearity
 
     @abc.abstractmethod
     def flows(self):
@@ -66,17 +136,11 @@ class Coupling(Flow):
         hidden_dims: int, non_linearity: Callable, norm: bool,
         num_bins: int = None,
     ):
-        if num_bins:
-            self.coupling_fn = rquad_spline_coupling
-        else:
-            self.coupling_fn = affine_coupling
+        super().__init__(num_bins, hidden_dims, non_linearity)
         self.split = int(d/2 + .5)
         self.d = d
         self.n_flow = n_flow
-        self.hidden_dims = hidden_dims
-        self.non_linearity = non_linearity
         self.norm = norm
-        self.num_bins = num_bins
 
     def flows(self):
         flows = []
