@@ -79,9 +79,8 @@ def run(dist, args, optim, N_PARAM, batch_fn=jax.vmap):
         batch_iter, batch_size, args.max_iter, batch_fn)
 
     print("SVGD")
-    dist.initialize_model(kinit, 1 * n_iter)
-    push_param = jax.tree_util.tree_map(lambda p: flow(p, param), dist.init_params)
-    particles = run_svgd(dist.logprob_fn, push_param, n_warm, n_iter, 1, optim)
+    push_param = jax.vmap(lambda p: flow(p, param)[0])(dist.init_params)
+    particles = run_svgd(dist.logprob_fn, push_param, n_warm, n_iter, (batch_iter, batch_size), optim)
 
     return particles, samples, param, flow, flow_inv
 
@@ -213,7 +212,7 @@ def run_svgd(logprob_fn, init_position, n_warm, n_iter, batch_shape, optim):
     tic2 = pd.Timestamp.now()
 
     sec = (tic2 - tic1).total_seconds()
-    particles = jax.tree_util.tree_map(lambda p: p.reshape((batch_shape, n_iter) + p.shape[1:]), particles)
+    particles = jax.tree_util.tree_map(lambda p: p.reshape(batch_shape + p.shape[1:]), particles)
     do_summary(particles, logprob_fn, sec)
     print("Runtime for SVGD", (tic2 - tic1).total_seconds())
     return particles

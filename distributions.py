@@ -239,22 +239,25 @@ class BiDistribution(Distribution):
 
 class BioOxygen(Distribution):
 
-    def __init__(self, times, obs, var) -> None:
+    def __init__(self, times, obs, var, mu, sigma) -> None:
         self._times = times
         self._obs = obs
         self._var = var
+        self._mu = mu
+        self._sigma = sigma
         super().__init__()
 
     def initialize_model(self, rng_key, n_chain):
         ki1, ki2 = jax.random.split(rng_key)
         self.init_params = {
-            'x1': jax.random.normal(ki1, shape=(n_chain,)), 
-            'x2': jax.random.normal(ki2, shape=(n_chain,))
+            'x1': self._mu + self._sigma * jax.random.normal(ki1, shape=(n_chain,)), 
+            'x2': self._mu + self._sigma * jax.random.normal(ki2, shape=(n_chain,))
         }
 
     def logprob(self, x1, x2):
-        return -.5 / self._var * jnp.sum((x1 * (1. - jnp.exp(-x2 * self._times)) - self._obs) ** 2)
-
+        lik = -.5 / self._var * jnp.sum((x1 * (1. - jnp.exp(-x2 * self._times)) - self._obs) ** 2)
+        prior = norm.logpdf(x1, self._mu, self._sigma) + norm.logpdf(x2, self._mu, self._sigma)
+        return lik + prior
 
 class Banana(BiDistribution):
     def logprob(self, x1, x2):

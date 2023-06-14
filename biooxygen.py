@@ -3,6 +3,7 @@ import argparse
 import jax
 import jax.numpy as jnp
 import jax.random as jrnd
+from jax.flatten_util import ravel_pytree
 import optax
 import distrax as dx
 import haiku as hk
@@ -10,10 +11,11 @@ import haiku as hk
 from distributions import BioOxygen
 from execute import run
 from exe import taylor_run
-from flows import Flow, RealSufficient, PositiveSufficient, make_cond, shift_scale
+from flows import make_dense, affine_coupling
+from blackjax.optimizers.cocob import cocob
 
 from jax.config import config
-# config.update("jax_debug_nans", True)
+config.update("jax_debug_nans", True)
 config.update("jax_enable_x64", True)
 
 
@@ -43,7 +45,8 @@ def plots(samples, param, flow, flow_inv):#, sam, sam2):
     ax[1].set_xlabel(r"$\theta_1$")
     ax[1].set_ylabel(r"$\theta_2$")
     # sns.kdeplot(x=phi_samples[:, 0], y=phi_samples[:, 1], ax=ax[2], fill=True)
-    sns.histplot(x=phi_samples[:, 0], y=phi_samples[:, 1], weights=jnp.exp(phi_weights), ax=ax[1], bins=50)
+    sns.histplot(x=phi_samples[:, 0], y=phi_samples[:, 1], ax=ax[1], bins=50)
+    # sns.histplot(x=u1, y=u2, ax=ax[0], bins=50)
     ax[0].set_title(r"$\pi(\theta)$")
     ax[0].set_xlabel(r"$\theta_1$")
     ax[0].set_ylabel(r"$\theta_2$")
@@ -53,66 +56,96 @@ def plots(samples, param, flow, flow_inv):#, sam, sam2):
     # plt.savefig("biooxygen2.png", bbox_inches='tight')
     # plt.close()
 
+    N = 20
+    theta0 = 1.
+    theta1 = .1
+    times = jnp.arange(1, 5, 4/N)
+    obs = theta0 * (1. - jnp.exp(-theta1 * times))
+    samo = jax.vmap(lambda t0, t1: jnp.sum(jnp.abs(obs - t0 * (1. - jnp.exp(-t1 * times)))))(x1, x2)
+    print(samo.mean(), samo.var())
+
     return None
 
-class Message(Flow):
-    def __init__(self, obs, times, num_bins=False, hidden_dims=0, non_linearity=None):
-        super().__init__(num_bins, hidden_dims, non_linearity)
-        self.obs = obs
-        self.times = times
+def get_affine(obs, times):
+    data = jnp.concatenate([obs, times, obs*times])
+    # data = jnp.array([jnp.mean(obs), jnp.mean(obs**2), jnp.mean(obs * times)])
+    # data = jnp.array([obs[0] / (2 - obs[1]/obs[0]), -jnp.log(1 - (2 - obs[1]/obs[0]))/times[0]])
+    # norm = hk.LayerNorm(-1, True, True)
+    # data = norm(data)
+    dense = make_dense(N_PARAM, 0, True, None, None)
+    param = dense(data)
+    data_affine = affine_coupling(param)
+    encoder = make_dense(N_PARAM-1, 0, False, None, None)
+    self_affine = dx.SplitCoupling(N_PARAM-1, 1, encoder, affine_coupling, swap=False)
+    return data_affine, self_affine
 
-    def flows(self):
-        # t0_transform = lambda x: self.obs / (1 - jnp.exp(-x * self.times))
-        t0_transform = lambda x: jnp.array([jnp.mean(self.obs), jnp.mean(self.times)])
-        t1_transform = lambda x: jnp.array([x[0], jnp.mean(self.obs), jnp.mean(self.times)])
-        # t1_transform = lambda x: -jnp.log(1 - self.obs / x) / self.times
+def _flow(u, obs, times):
+    data_affine, self_affine = get_affine(obs, times)
+    u_, ldj_ = data_affine.forward_and_log_det(u)
+    x, ldj = self_affine.forward_and_log_det(u_)
+    return x, jnp.sum(ldj_) + ldj
+flow_ = hk.transform(_flow)
+def flow(u, obs, times, param):
+    u, unravel_fn = ravel_pytree(u)
+    x, ldj = flow_.apply(param, None, u, obs, times)
+    return unravel_fn(x), jnp.sum(ldj)
+param_init = flow_.init
 
-        flows = []
-        t0_1 = make_cond(1, RealSufficient(axis=1, transform=t0_transform), self)
-        flows.append(dx.SplitCoupling(1, 1, t0_1, self.coupling_fn, swap=True))
-
-        t1_1 = make_cond(1, RealSufficient(axis=1, transform=t1_transform), self)
-        flows.append(dx.SplitCoupling(1, 1, t1_1, self.coupling_fn, swap=False))
-
-        # t0_2 = make_cond(1, RealSufficient(axis=None, transform=t0_transform), self)
-        # flows.append(dx.SplitCoupling(1, 1, t0_2, self.coupling_fn, swap=True))
-
-        # t1_2 = make_cond(1, RealSufficient(axis=None, transform=t1_transform), self)
-        # flows.append(dx.SplitCoupling(1, 1, t1_2, self.coupling_fn, swap=False))
-
-        # t0_3 = make_cond(1, RealSufficient(axis=None, transform=t0_transform), self)
-        # flows.append(dx.SplitCoupling(1, 1, t0_3, self.coupling_fn, swap=True))
-
-        # t1_3 = make_cond(1, RealSufficient(axis=None, transform=t1_transform), self)
-        # flows.append(dx.SplitCoupling(1, 1, t1_3, self.coupling_fn, swap=False))
-
-        return dx.Chain(flows)
+def _flow_inv(x, obs, times):
+    data_affine, self_affine = get_affine(obs, times)
+    x_, ldj_ = data_affine.inverse_and_log_det(x)
+    u, ldj = self_affine.inverse_and_log_det(x_)
+    return u, jnp.sum(ldj_) + ldj
+flow_inv_ = hk.transform(_flow_inv)
+def flow_inv(x, obs, times, param):
+    x, unravel_fn = ravel_pytree(x)
+    u, ldj = flow_inv_.apply(param, None, x, obs, times)
+    return unravel_fn(u), jnp.sum(ldj)
 
 def main(args):
 
     print("Generating synthetic data...")
     N = 20
+    # N=2
     theta0 = 1.
     theta1 = .1
     var = 2 * 10 ** (-4)
     times = jnp.arange(1, 5, 4/N)
-    std_norms = jrnd.normal(jrnd.PRNGKey(args.seed), (N,))
+    # times = jnp.array([1, 2])
+    rng_key = jrnd.PRNGKey(args.seed)
+    key1, key2 = jrnd.split(rng_key)
+    std_norms = jrnd.normal(key1, (N,))
     obs = theta0 * (1. - jnp.exp(-theta1 * times)) + jnp.sqrt(var) * std_norms
+    print(theta0 * (1. - jnp.exp(-theta1 * times)))
 
     print("Setting up Biochemical oxygen demand density...")
-    dist = BioOxygen(times, obs, var)
+    prior_mean = 0.
+    prior_sd = 1.
+    dist = BioOxygen(times, obs, var, prior_mean, prior_sd)
+    def prior_gn(key):
+        k0, k1 = jrnd.split(key)
+        theta0 = prior_mean + prior_sd * jrnd.normal(k0)
+        theta1 = prior_mean + prior_sd * jrnd.normal(k1)
+        return jnp.array([theta0, theta1])
+    def likelihood_gn(key, params):
+        theta0, theta1 = params
+        std_norms = jrnd.normal(key, (N,))
+        obs = theta0 * (1. - jnp.exp(-theta1 * times)) + jnp.sqrt(var) * std_norms
+        return obs, times
 
-    [n_warm, n_iter] = args.sampling_param
-    schedule = optax.exponential_decay(init_value=1e-2,
-        transition_steps=n_warm-10, decay_rate=.1, transition_begin=10)
-    optim = optax.adam(schedule)
+    # [n_warm, n_iter] = args.sampling_param
+    # schedule = optax.exponential_decay(init_value=1e-2,
+    #     transition_steps=n_warm-10, decay_rate=.1, transition_begin=10)
+    # optim = optax.adam(schedule)
+    optim = cocob()
 
     particles, *plot_params = run(dist, args, optim, N_PARAM, batch_fn=jax.vmap)
     plots(*plot_params)
     plots(particles, *(plot_params[1:]))
 
-    flow = Message(obs, times, num_bins=20)
-    plot_params = taylor_run(dist, args, flow, optim, N_PARAM, jax.vmap)
+    position = jnp.array([theta0, theta1])
+    init_param = param_init(key2, position, obs, times)
+    plot_params = taylor_run(dist, args, init_param, flow, flow_inv, optim, N, likelihood_gn, prior_gn)
     plots(*plot_params)
     plt.show()
 
