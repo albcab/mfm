@@ -8,14 +8,15 @@ import optax
 import distrax as dx
 import haiku as hk
 
-from distributions import BioOxygen
+from distributions import BioOxygen, MultivarNormal
 from execute import run
 from exe import taylor_run
+from exe_fm import run as fm_run
 from flows import make_dense, affine_coupling
 from blackjax.optimizers.cocob import cocob
 
 from jax.config import config
-config.update("jax_debug_nans", True)
+# config.update("jax_debug_nans", True)
 config.update("jax_enable_x64", True)
 
 
@@ -121,33 +122,49 @@ def main(args):
     print("Setting up Biochemical oxygen demand density...")
     prior_mean = 0.
     prior_sd = 1.
-    dist = BioOxygen(times, obs, var, prior_mean, prior_sd)
+    # dist = BioOxygen(times, obs, var, prior_mean, prior_sd)
+    mean = jnp.array([-10, 10])
+    cov = jnp.array([[1, .5], [.5, 1]])
+    dist = MultivarNormal(mean, cov)
     def prior_gn(key):
         k0, k1 = jrnd.split(key)
-        theta0 = prior_mean + prior_sd * jrnd.normal(k0)
-        theta1 = prior_mean + prior_sd * jrnd.normal(k1)
-        return jnp.array([theta0, theta1])
-    def likelihood_gn(key, params):
-        theta0, theta1 = params
-        std_norms = jrnd.normal(key, (N,))
-        obs = theta0 * (1. - jnp.exp(-theta1 * times)) + jnp.sqrt(var) * std_norms
-        return obs, times
+        x0 = -10. + 2. * jrnd.normal(k0)
+        x1 = 10. + 2. * jrnd.normal(k1)
+        return jnp.array([x0, x1])
+    # def prior_gn(key):
+    #     k0, k1 = jrnd.split(key)
+    #     theta0 = prior_mean + prior_sd * jrnd.normal(k0)
+    #     theta1 = prior_mean + prior_sd * jrnd.normal(k1)
+    #     return jnp.array([theta0, theta1])
+    # def likelihood_gn(key, params):
+    #     theta0, theta1 = params
+    #     std_norms = jrnd.normal(key, (N,))
+    #     obs = theta0 * (1. - jnp.exp(-theta1 * times)) + jnp.sqrt(var) * std_norms
+    #     return obs, times
 
-    # [n_warm, n_iter] = args.sampling_param
-    # schedule = optax.exponential_decay(init_value=1e-2,
+    [n_warm, n_iter] = args.sampling_param
+    # schedule = optax.exponential_decay(init_value=1e-4,
     #     transition_steps=n_warm-10, decay_rate=.1, transition_begin=10)
     # optim = optax.adam(schedule)
     optim = cocob()
 
-    particles, *plot_params = run(dist, args, optim, N_PARAM, batch_fn=jax.vmap)
+    plot_params = fm_run(dist, args, N_PARAM, optim, 0.1, prior_gn)
     plots(*plot_params)
-    plots(particles, *(plot_params[1:]))
-
-    position = jnp.array([theta0, theta1])
-    init_param = param_init(key2, position, obs, times)
-    plot_params = taylor_run(dist, args, init_param, flow, flow_inv, optim, N, likelihood_gn, prior_gn)
-    plots(*plot_params)
+    keys = jrnd.split(key2, 100*4*32)
+    real = jax.vmap(lambda k: jrnd.multivariate_normal(k, mean, cov))(keys)
+    fig, ax = plt.subplots()
+    sns.histplot(x=real[:, 0], y=real[:, 1], ax=ax, bins=50)
     plt.show()
+
+    # particles, *plot_params = run(dist, args, optim, N_PARAM, batch_fn=jax.vmap)
+    # plots(*plot_params)
+    # plots(particles, *(plot_params[1:]))
+
+    # position = jnp.array([theta0, theta1])
+    # init_param = param_init(key2, position, obs, times)
+    # plot_params = taylor_run(dist, args, init_param, flow, flow_inv, optim, N, likelihood_gn, prior_gn)
+    # plots(*plot_params)
+    # plt.show()
 
 
 if __name__ == "__main__":

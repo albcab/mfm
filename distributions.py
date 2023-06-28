@@ -2,7 +2,7 @@ import abc
 
 import jax
 import jax.numpy as jnp
-from jax.scipy.stats import norm, gamma, bernoulli, t
+from jax.scipy.stats import norm, gamma, bernoulli, t, multivariate_normal
 from jax.scipy.special import expit
 
 import numpyro
@@ -305,3 +305,13 @@ class MixtureNormal(BiDistribution):
             + self._w2 * norm.pdf(x1, -2., .1) * norm.pdf(x2, -2., .1)
         )
 
+class MultivarNormal(BiDistribution):
+    def __init__(self, mean=jnp.zeros(2), cov=jnp.eye(2)) -> None:
+        super().__init__()
+        self._mean = mean
+        self._cov = cov
+
+    def logprob(self, x1, x2):
+        return multivariate_normal.logpdf(
+            jnp.array([x1, x2]), self._mean, self._cov,
+        )
