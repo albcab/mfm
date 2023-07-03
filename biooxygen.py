@@ -16,7 +16,7 @@ from flows import make_dense, affine_coupling
 from blackjax.optimizers.cocob import cocob
 
 from jax.config import config
-# config.update("jax_debug_nans", True)
+config.update("jax_debug_nans", True)
 config.update("jax_enable_x64", True)
 
 

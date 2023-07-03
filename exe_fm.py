@@ -3,6 +3,7 @@ import pandas as pd
 import jax
 from jax.flatten_util import ravel_pytree
 from jax.experimental.ode import odeint
+from jax.experimental.host_callback import id_print
 
 import optax
 import haiku as hk
@@ -11,6 +12,7 @@ from execute import do_summary
 
 from blackjax.mcmc.mala import mala
 from fmx.data import flow_matching
+from fmx.sampling import flow_matching as flow_matching_sampling
 
 init_W = hk.initializers.VarianceScaling(0.1)
 init_b = hk.initializers.RandomNormal(0.01)
@@ -64,6 +66,10 @@ def run(dist, args, N_PARAM, optim, step_size, prior_gn=None):
         vector_field_params = prior_precondition(key_precond, prior_gn, prior_samples, 
             precond_iter, vector_field, vector_field_params, optim)
     
+    # print("Algorithm 2")
+    # samples, params = algo_2(key_sample, dist.logprob_fn, one_init_position,
+    #     n_iter, vector_field, vector_field_params, optim, n_chain, step_size, args.max_iter)
+
     print("Algorithm 3")
     samples, params = algo_3(key_sample, dist.logprob_fn, dist.init_params,
         n_iter, vector_field, vector_field_params, optim, n_chain, step_size, args.max_iter)
@@ -86,15 +92,15 @@ def prior_precondition(rng_key, prior_gn, n_samples, n_iter, vector_field, init_
     ks_sample = jax.random.split(k_sample, n_samples)
     prior_samples = jax.vmap(prior_gn)(ks_sample)
     fmx = flow_matching(vector_field.apply, prior_samples, reference_gn=None)
-    fm_loss = fmx.get_loss(k_optim, n_samples)
     optim_state = optim.init(init_params)
-    def one_iter(carry, _):
+    def one_iter(carry, key):
         optim_state, params = carry
-        loss_value, grads = jax.value_and_grad(fm_loss)(params)
+        loss_value, grads = jax.value_and_grad(fmx.loss, 1)(key, params, n_samples)
         updates, optim_state = optim.update(grads, optim_state, params)
         params = optax.apply_updates(params, updates)
         return (optim_state, params), None
-    (_, params), _ = jax.lax.scan(one_iter, (optim_state, init_params), jax.numpy.arange(n_iter))
+    ks_optim = jax.random.split(k_optim, n_iter)
+    (_, params), _ = jax.lax.scan(one_iter, (optim_state, init_params), ks_optim)
     return params
 
 
@@ -108,15 +114,15 @@ def algo_3(rng_key, logprob_fn, init_position, n_iter, vector_field, init_params
         ks_sample = jax.random.split(k_sample, n_chain)
         states, infos = mapped_step(ks_sample, states)
         fmx = flow_matching(vector_field.apply, states.position, reference_gn=None)
-        fm_loss = fmx.get_loss(k_optim, n_chain)
-        def one_optim_iter(carry, _):
+        def one_optim_iter(carry, key):
             optim_state, params = carry
-            loss_value, grads = jax.value_and_grad(fm_loss)(params)
+            loss_value, grads = jax.value_and_grad(fmx.loss, 1)(key, params, n_chain)
             updates, optim_state = optim.update(grads, optim_state, params)
             params = optax.apply_updates(params, updates)
             return (optim_state, params), loss_value
+        ks_optim = jax.random.split(k_optim, optim_iter)
         (optim_state, params), loss_value = jax.lax.scan(
-            one_optim_iter, (optim_state, params), jax.numpy.arange(optim_iter))
+            one_optim_iter, (optim_state, params), ks_optim)
         return (states, optim_state, params), (states.position, loss_value)
 
     tic1 = pd.Timestamp.now()
@@ -132,5 +138,34 @@ def algo_3(rng_key, logprob_fn, init_position, n_iter, vector_field, init_params
     tic2 = pd.Timestamp.now()
 
     print("Runtime for Algo 3", (tic2 - tic1).total_seconds())
+    samples = jax.tree_util.tree_map(lambda s: s.reshape(1, -1), samples)
+    return samples, params
+
+def algo_2(rng_key, logprob_fn, init_position, n_iter, vector_field, init_params, optim, n_chain, step_size, optim_iter):
+    kernel = mala(logprob_fn, step_size)
+    fmx = flow_matching_sampling(vector_field.apply, init_position, kernel.init, kernel.step, reference_gn=None, adjoint_method=True)
+
+    def one_iter(carry, key):
+        optim_state, params = carry
+        def one_optim_iter(carry, key):
+            optim_state, params = carry
+            id_print(key)
+            grads, loss_value, samples = fmx.loss(key, params, n_chain)
+            # grads = jax.tree_util.tree_map(lambda g: g.sum(), grads)
+            updates, optim_state = optim.update(grads, optim_state, params)
+            params = optax.apply_updates(params, updates)
+            return (optim_state, params), (loss_value, samples)
+        (optim_state, params), (loss_value, samples) = jax.lax.scan(
+            one_optim_iter, (optim_state, params), jax.random.split(key, optim_iter))
+        return (optim_state, params), (samples, loss_value)
+
+    tic1 = pd.Timestamp.now()
+    keys = jax.random.split(rng_key, n_iter)
+    optim_state = optim.init(init_params)
+    (optim_state, params), (samples, losses) = jax.lax.scan(
+        one_iter, (optim_state, init_params), keys)
+    tic2 = pd.Timestamp.now()
+
+    print("Runtime for Algo 2", (tic2 - tic1).total_seconds())
     samples = jax.tree_util.tree_map(lambda s: s.reshape(1, -1), samples)
     return samples, params
