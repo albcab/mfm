@@ -39,7 +39,7 @@ non_lins = {
 }
 
 
-def run(dist, args, N_PARAM, optim, step_size, prior_gn=None):
+def run(dist, args, N_PARAM, optim, prior_gn=None):
     [n_warm, n_iter] = args.sampling_param
     [batch_iter, batch_size] = args.batch_shape
     n_chain = batch_iter * batch_size
@@ -66,13 +66,23 @@ def run(dist, args, N_PARAM, optim, step_size, prior_gn=None):
         vector_field_params = prior_precondition(key_precond, prior_gn, prior_samples, 
             precond_iter, vector_field, vector_field_params, optim)
     
-    # print("Algorithm 2")
-    # samples, params = algo_2(key_sample, dist.logprob_fn, one_init_position,
-    #     n_iter, vector_field, vector_field_params, optim, n_chain, step_size, args.max_iter)
+    print("Algorithm 3 w/ refresh")
+    algo_3_out_r = algo_3(key_sample, dist.logprob_fn, dist.init_params,
+        n_iter, vector_field, vector_field_params, optim, n_chain, args.sample_iter, args.step_size[2], args.max_iter)
+    
+    # print("Algorithm 3 w/o refresh")
+    # algo_3_out_nr = algo_3(key_sample, dist.logprob_fn, dist.init_params,
+    #     n_iter, vector_field, vector_field_params, optim, n_chain, args.sample_iter, args.step_size[1], args.max_iter, False)
+    algo_3_out_nr = None
+    
+    print("Algorithm 2 w/ adjoint gradients")
+    algo_2_out_a = algo_2(key_sample, dist.logprob_fn, one_init_position,
+        n_iter, vector_field, vector_field_params, optim, n_chain, args.sample_iter, args.step_size[0], args.max_iter)
 
-    print("Algorithm 3")
-    samples, params = algo_3(key_sample, dist.logprob_fn, dist.init_params,
-        n_iter, vector_field, vector_field_params, optim, n_chain, step_size, args.max_iter)
+    # print("Algorithm 2 w/ discretize-then-optimize")
+    # algo_2_out_dto = algo_2(key_sample, dist.logprob_fn, one_init_position,
+    #     n_iter, vector_field, vector_field_params, optim, n_chain, args.sample_iter, args.step_size[0], args.max_iter, False)
+    algo_2_out_dto = None
     
     def flow(u, param):
         u, unravel_fn = ravel_pytree(u)
@@ -84,7 +94,7 @@ def run(dist, args, N_PARAM, optim, step_size, prior_gn=None):
         flow = odeintegrator(lambda x, time: vector_field.apply(param, 1.0 - time, x), x)
         return unravel_fn(flow[-1]), 1
     
-    return samples, params, flow, flow_inv
+    return algo_2_out_a, algo_2_out_dto, algo_3_out_r, algo_3_out_nr, (flow, flow_inv)
 
 
 def prior_precondition(rng_key, prior_gn, n_samples, n_iter, vector_field, init_params, optim):
@@ -104,15 +114,25 @@ def prior_precondition(rng_key, prior_gn, n_samples, n_iter, vector_field, init_
     return params
 
 
-def algo_3(rng_key, logprob_fn, init_position, n_iter, vector_field, init_params, optim, n_chain, step_size, optim_iter):
+def algo_3(rng_key, logprob_fn, init_position, n_iter, vector_field, init_params, optim, n_chain, sample_iter, step_size, optim_iter, refresh=True):
     kernel = mala(logprob_fn, step_size)
     mapped_step = jax.vmap(kernel.step)
+    if refresh:
+        mapped_init = jax.vmap(kernel.init)
+        fmx_init = flow_matching(vector_field.apply, init_position, reference_gn=None)
 
     def one_iter(carry, key):
         states, optim_state, params = carry
         k_sample, k_optim = jax.random.split(key)
-        ks_sample = jax.random.split(k_sample, n_chain)
-        states, infos = mapped_step(ks_sample, states)
+        if refresh:
+            positions = fmx_init.sample(k_sample, params, n_chain)
+            states = mapped_init(positions)
+        def one_sample_iter(states, k_sample):
+            ks_sample = jax.random.split(k_sample, n_chain)
+            states, infos = mapped_step(ks_sample, states)
+            return states, infos
+        keys_sample = jax.random.split(k_sample, sample_iter)
+        states, infos = jax.lax.scan(one_sample_iter, states, keys_sample)
         fmx = flow_matching(vector_field.apply, states.position, reference_gn=None)
         def one_optim_iter(carry, key):
             optim_state, params = carry
@@ -123,7 +143,7 @@ def algo_3(rng_key, logprob_fn, init_position, n_iter, vector_field, init_params
         ks_optim = jax.random.split(k_optim, optim_iter)
         (optim_state, params), loss_value = jax.lax.scan(
             one_optim_iter, (optim_state, params), ks_optim)
-        return (states, optim_state, params), (states.position, loss_value)
+        return (states, optim_state, params), (states.position, loss_value, infos.acceptance_rate.mean())
 
     tic1 = pd.Timestamp.now()
     rng_key, key_init = jax.random.split(rng_key)
@@ -132,40 +152,40 @@ def algo_3(rng_key, logprob_fn, init_position, n_iter, vector_field, init_params
     init_states = jax.vmap(kernel.init)(init_position_fm)
     keys = jax.random.split(rng_key, n_iter)
     optim_state = optim.init(init_params)
-    (_, optim_state, params), (samples, losses) = jax.lax.scan(
+    (_, optim_state, params), (samples, losses, acc) = jax.lax.scan(
         one_iter, (init_states, optim_state, init_params), keys)
     # samples = states.position
     tic2 = pd.Timestamp.now()
 
+    print("Average and std acceptance rates=", acc.mean(), acc.std())
     print("Runtime for Algo 3", (tic2 - tic1).total_seconds())
     samples = jax.tree_util.tree_map(lambda s: s.reshape(1, -1), samples)
     return samples, params
 
-def algo_2(rng_key, logprob_fn, init_position, n_iter, vector_field, init_params, optim, n_chain, step_size, optim_iter):
+def algo_2(rng_key, logprob_fn, init_position, n_iter, vector_field, init_params, optim, n_chain, sample_iter, step_size, optim_iter, adjoint=True):
     kernel = mala(logprob_fn, step_size)
-    fmx = flow_matching_sampling(vector_field.apply, init_position, kernel.init, kernel.step, reference_gn=None, adjoint_method=True)
+    fmx = flow_matching_sampling(vector_field.apply, init_position, kernel.init, kernel.step, sample_iter, reference_gn=None, adjoint_method=adjoint)
 
     def one_iter(carry, key):
         optim_state, params = carry
         def one_optim_iter(carry, key):
             optim_state, params = carry
-            id_print(key)
-            grads, loss_value, samples = fmx.loss(key, params, n_chain)
-            # grads = jax.tree_util.tree_map(lambda g: g.sum(), grads)
+            grads, loss_value, samples, infos = fmx.loss(key, params, n_chain)
             updates, optim_state = optim.update(grads, optim_state, params)
             params = optax.apply_updates(params, updates)
-            return (optim_state, params), (loss_value, samples)
-        (optim_state, params), (loss_value, samples) = jax.lax.scan(
+            return (optim_state, params), (loss_value, samples, infos.acceptance_rate.mean())
+        (optim_state, params), (loss_value, samples, acc) = jax.lax.scan(
             one_optim_iter, (optim_state, params), jax.random.split(key, optim_iter))
-        return (optim_state, params), (samples, loss_value)
+        return (optim_state, params), (samples, loss_value, acc.mean())
 
     tic1 = pd.Timestamp.now()
     keys = jax.random.split(rng_key, n_iter)
     optim_state = optim.init(init_params)
-    (optim_state, params), (samples, losses) = jax.lax.scan(
+    (optim_state, params), (samples, losses, acc) = jax.lax.scan(
         one_iter, (optim_state, init_params), keys)
     tic2 = pd.Timestamp.now()
 
+    print("Average and std acceptance rates=", acc.mean(), acc.std())
     print("Runtime for Algo 2", (tic2 - tic1).total_seconds())
     samples = jax.tree_util.tree_map(lambda s: s.reshape(1, -1), samples)
     return samples, params
