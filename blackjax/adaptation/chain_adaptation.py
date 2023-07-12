@@ -20,8 +20,8 @@ def cross_chain(
     batch_fn: Callable = jax.vmap,
 ):
     def init(initial_states: NamedTuple) -> ChainState:
-        check_leaves_shape = jax.tree_leaves(
-            jax.tree_map(lambda s: s.shape[0] == num_chain, initial_states)
+        check_leaves_shape = jax.tree_util.tree_leaves(
+            jax.tree_util.tree_map(lambda s: s.shape[0] == num_chain, initial_states)
         )
         if not all(check_leaves_shape):
             raise ValueError(
@@ -49,8 +49,8 @@ def parallel_eca(
     batch_fn: Callable = jax.vmap,
 ):
     def init(initial_states: NamedTuple) -> ChainState:
-        check_leaves_shape = jax.tree_leaves(
-            jax.tree_map(
+        check_leaves_shape = jax.tree_util.tree_leaves(
+            jax.tree_util.tree_map(
                 lambda s: s.shape[:2] == (num_batch, batch_size), initial_states
             )
         )
@@ -68,7 +68,7 @@ def parallel_eca(
                 batch_state, state.current_iter, *batch_param
             )
         )(state.states, *param)
-        params = jax.tree_map(lambda p: jnp.concatenate([p[1:], p[:1]]), parameters)
+        params = jax.tree_util.tree_map(lambda p: jnp.concatenate([p[1:], p[:1]]), parameters)
         rng_keys = jax.random.split(rng_key, num_batch)
         skip = jnp.ones(num_batch).at[state.current_iter % num_batch].set(0)
 
