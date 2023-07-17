@@ -22,8 +22,8 @@ def make_dense(d, hidden_dims, norm, non_linearity, num_bins):
     layers = []
     if norm:
         layers.append(hk.LayerNorm(-1, True, True))
-    for _ in range(hidden_dims):
-        layers.append(hk.Linear(d, w_init=hk.initializers.VarianceScaling(.01), b_init=hk.initializers.RandomNormal(.01)))
+    for h in hidden_dims:
+        layers.append(hk.Linear(h, w_init=hk.initializers.VarianceScaling(.01), b_init=hk.initializers.RandomNormal(.01)))
         if norm:
             layers.append(hk.LayerNorm(-1, True, True))
         layers.append(non_linearity)

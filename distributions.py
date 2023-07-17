@@ -275,7 +275,7 @@ class NealsFunnel(Distribution):
 
     def logprob(self, x1, x2):
         return norm.logpdf(x1, 0.0, 1.) + jnp.sum(norm.logpdf(
-            x2, 0., jnp.exp(2. * x1)
+            x2, 0., jnp.exp(.5 * x1)
         ))
 
     def initialize_model(self, rng_key, n_chain):
