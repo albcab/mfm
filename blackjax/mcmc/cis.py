@@ -27,7 +27,7 @@ def init(pullback_position: PyTree):
     return CISState(pullback_position, pullback_position)
 
 
-def build_kernel(Callable, num_sam: int):
+def build_kernel(num_sam: int):
     def kernel(
         rng_key: PRNGKey,
         state: CISState,

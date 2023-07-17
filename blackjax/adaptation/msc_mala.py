@@ -1,10 +1,11 @@
-"""Markovian Score Climbing with Conditional Importance sampling"""
+"""Markovian Score Climbing with MALA"""
 
 from typing import Callable
 
 import jax
+from jax.flatten_util import ravel_pytree
 
-from blackjax.mcmc.cis import build_kernel, init
+from blackjax.mcmc.mala import build_kernel, init
 from blackjax.adaptation.chain_adaptation import cross_chain, ChainState
 from blackjax.adaptation.atess import optimize
 from blackjax.base import AdaptationAlgorithm
@@ -46,7 +47,7 @@ def base(
     return init, update, final
 
 
-def msc(
+def msc_mala(
     logprob_fn: Callable,
     optim,
     init_param,
@@ -54,21 +55,23 @@ def msc(
     loss,
     num_batch: int,
     batch_size: int,
+    step_size: float,
     num_steps: int = 1000,
     n_iter: int = 1,
-    num_importance_samples: int = 1,
+    num_mala_samples: int = 1,
 ) -> AdaptationAlgorithm:
 
-    kernel = build_kernel(num_importance_samples)
+    kernel = build_kernel()
 
     def kernel_factory(param: PyTree, opt_state: PyTree):
         def kernel_fn(rng_key, state):
-            return kernel(
-                rng_key,
-                state,
-                logprob_fn,
-                lambda u: flow(u, param),
-            )
+            flat_position, unravel_fn = ravel_pytree(state.position)
+            key_init, key_sample = jax.random.split(rng_key)
+            ref_sample = jax.random.normal(key_init, flat_position.shape)
+            fresh_position = flow(unravel_fn(ref_sample), param)[0]
+            fresh_state = init(fresh_position, logprob_fn)
+            return jax.lax.scan(lambda s, k: kernel(k, s, logprob_fn, step_size),
+                fresh_state, jax.random.split(key_sample, num_mala_samples))
 
         return kernel_fn
 
@@ -81,7 +84,7 @@ def msc(
         n_iter,
     )
 
-    init_batch = jax.vmap(lambda pp: init(pp))
+    init_batch = jax.vmap(lambda pp: init(pp, logprob_fn))
     params = (init_param, optim.init(init_param))
 
     def one_step(carry, rng_key):
@@ -100,6 +103,6 @@ def msc(
         )
         kernel, param = final(last_state, parameters)
 
-        return last_state, kernel, param#warmup_states
+        return last_state, kernel, param, info#warmup_states
 
     return AdaptationAlgorithm(run)  # type: ignore[arg-type]
