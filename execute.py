@@ -15,7 +15,10 @@ from distances import kullback_liebler, renyi_alpha
 from mcmc_utils import inference_loop0, stein_disc, autocorrelation
 
 from blackjax.mcmc.tess import tess
+from blackjax.mcmc.cis import cis
 from blackjax.adaptation.atess import atess, optimize
+from blackjax.adaptation.msc import msc
+from blackjax.adaptation.msc_mala import msc_mala
 from blackjax.vi.svgd import coin_svgd, svgd, update_median_heuristic
 
 
@@ -67,22 +70,35 @@ def run(dist, args, optim, N_PARAM, batch_fn=jax.vmap):
         args.n_flow, args.n_hidden, args.non_linearity, args.num_bins
     )
 
-    one_init_param = jax.tree_map(lambda p: p[0], dist.init_params)
+    one_init_param = jax.tree_util.tree_map(lambda p: p[0], dist.init_params)
     mc_samples = 1000
     precond_iter = args.preconditon_iter
     precond_param = run_precondition(kflow, init_param, one_init_param, 
         optim, reverse, mc_samples, precond_iter)
     
     print("TESS w/ precond.")
-    samples, param = run_tess(ksam, dist.logprob_fn, dist.init_params,
-        n_warm, n_iter, precond_param, optim, flow, forward, 
+    tess_out = run_tess(ksam, dist.logprob_fn, dist.init_params,
+        n_warm, n_iter, init_param, optim, flow, forward, 
         batch_iter, batch_size, args.max_iter, batch_fn)
 
-    print("SVGD")
-    push_param = jax.vmap(lambda p: flow(p, param)[0])(dist.init_params)
-    particles = run_svgd(dist.logprob_fn, push_param, n_warm, n_iter, (batch_iter, batch_size), optim)
+    print("MSC CIS")
+    msc_cis_out = run_msc(ksam, dist.logprob_fn, dist.init_params,
+        n_warm, n_iter, init_param, optim, flow, forward,
+        batch_iter, batch_size, args.max_iter, args.sample_iter)
+    
+    print("MSC MALA")
+    msc_mala_out = run_msc_mala(ksam, dist.logprob_fn, dist.init_params,
+        n_warm, n_iter, init_param, optim, flow, forward,
+        batch_iter, batch_size, args.max_iter, args.step_size[0], args.sample_iter)
 
-    return particles, samples, param, flow, flow_inv
+    # print("SVGD")
+    # dist.initialize_model(kinit, batch_iter * batch_size * n_iter)
+    # push_param = jax.vmap(lambda p: flow(p, init_param)[0])(dist.init_params)
+    # particles = run_svgd(dist.logprob_fn, push_param, n_warm, (batch_iter * batch_size, n_iter), optim)
+    particles = None
+    print()
+
+    return tess_out, msc_cis_out, msc_mala_out, (flow, flow_inv)#(particles, precond_param), (flow, flow_inv)
 
 
 non_lins = {
@@ -120,9 +136,6 @@ def initialize_flow(
     rng_key, logprob_fn, flow, distance, 
     d, n_flow, n_hidden, non_linearity, num_bins,
 ):
-    if flow in ['iaf', 'riaf'] and any([nh != d for nh in n_hidden]):
-        warnings.warn('IAF flows always have dimension of hidden units same as params.')
-
     if flow in ['iaf', 'riaf'] and num_bins:
         warnings.warn('IAF cannot do rational quadratic splines.')
     
@@ -163,8 +176,8 @@ def run_tess(
     batch_iter, batch_size, maxiter,
     batch_fn = jax.pmap,
 ):
-    check_shapes = jax.tree_leaves(
-        jax.tree_map(lambda p: p.shape[0] == batch_iter * batch_size, init_position)
+    check_shapes = jax.tree_util.tree_leaves(
+        jax.tree_util.tree_map(lambda p: p.shape[0] == batch_iter * batch_size, init_position)
     )
     if not all(check_shapes):
         raise ValueError("Num. of chains on initial positions don't match batch_size * batch_iter")
@@ -187,7 +200,7 @@ def run_tess(
     tic2 = pd.Timestamp.now()
 
     sec = (tic2 - tic1).total_seconds()
-    do_summary(samples, logprob_fn, sec)
+    # do_summary(samples, logprob_fn, sec)
     print("Runtime for TESS", (tic2 - tic1).total_seconds())
     return samples, param
 
@@ -199,20 +212,78 @@ def inference_loop_svgd(init_state, step, n_iter):
     state, _ = jax.lax.scan(one_iter, init_state, jax.numpy.arange(n_iter))
     return state
 
-def run_svgd(logprob_fn, init_position, n_warm, n_iter, batch_shape, optim):
+def run_svgd(logprob_fn, init_position, n_warm, batch_shape, optim):
     tic1 = pd.Timestamp.now()
     if optim is not None:
-        init, step = svgd(jax.grad(logprob_fn), optim)
+        init, step = svgd(jax.grad(logprob_fn), optim, update_kernel_parameters=lambda state: state)
     else:
         init, step = coin_svgd(jax.grad(logprob_fn))
     init_state = init(init_position)
     init_state = update_median_heuristic(init_state)
-    state = inference_loop_svgd(init_state, step, n_warm + n_iter)
+    state = inference_loop_svgd(init_state, step, n_warm)
     particles = state.particles
     tic2 = pd.Timestamp.now()
 
     sec = (tic2 - tic1).total_seconds()
     particles = jax.tree_util.tree_map(lambda p: p.reshape(batch_shape + p.shape[1:]), particles)
-    do_summary(particles, logprob_fn, sec)
+    # do_summary(particles, logprob_fn, sec)
     print("Runtime for SVGD", (tic2 - tic1).total_seconds())
     return particles
+
+
+def run_msc(
+    rng_key, logprob_fn,
+    init_position, n_warm, n_iter,
+    init_param, optim, flow, forward,
+    batch_iter, batch_size, maxiter, num_importance_samples
+):
+    tic1 = pd.Timestamp.now()
+    k_warm, k_sample = jrnd.split(rng_key)
+    if n_warm > 0:
+        warmup = msc(logprob_fn, optim, init_param, flow, forward, batch_iter, batch_size, n_warm, maxiter, num_importance_samples=num_importance_samples)
+        chain_state, kernel, param = warmup.run(k_warm, init_position)
+        init_state = chain_state.states
+    else:
+        init, kernel = cis(logprob_fn, lambda u: (u, 0))
+        init_state = jax.vmap(init)(init_position)
+    def one_chain(k_sam, init_state):
+        state, info = inference_loop0(k_sam, init_state, kernel, n_iter)
+        return state.position, info
+    k_sample = jrnd.split(k_sample, batch_iter * batch_size)
+    samples, infos = jax.vmap(one_chain)(k_sample, init_state)
+    tic2 = pd.Timestamp.now()
+
+    sec = (tic2 - tic1).total_seconds()
+    # do_summary(samples, logprob_fn, sec)
+    print("Runtime for MSC CIS", (tic2 - tic1).total_seconds())
+    return samples, param
+
+
+def run_msc_mala(
+    rng_key, logprob_fn,
+    init_position, n_warm, n_iter,
+    init_param, optim, flow, forward,
+    batch_iter, batch_size, maxiter, step_size, num_mala_samples
+):
+    tic1 = pd.Timestamp.now()
+    k_warm, k_sample = jrnd.split(rng_key)
+    if n_warm > 0:
+        warmup = msc_mala(logprob_fn, optim, init_param, flow, forward, batch_iter, batch_size, step_size, n_warm, maxiter, num_mala_samples=num_mala_samples)
+        chain_state, kernel, param, info = warmup.run(k_warm, init_position)
+        init_state = chain_state.states
+    else:
+        init, kernel = cis(logprob_fn, lambda u: (u, 0))
+        init_state = jax.vmap(init)(init_position)
+    def one_chain(k_sam, init_state):
+        state, info = inference_loop0(k_sam, init_state, kernel, n_iter)
+        return state.position, info
+    k_sample = jrnd.split(k_sample, batch_iter * batch_size)
+    samples, infos = jax.vmap(one_chain)(k_sample, init_state)
+    tic2 = pd.Timestamp.now()
+
+    sec = (tic2 - tic1).total_seconds()
+    # do_summary(samples, logprob_fn, sec)
+    print("Average and std acceptance rates warm=", info.acceptance_rate.mean(), info.acceptance_rate.std())
+    print("Average and std acceptance rates iter=", infos.acceptance_rate.mean(), infos.acceptance_rate.std())
+    print("Runtime for MSC MALA", (tic2 - tic1).total_seconds())
+    return samples, param
