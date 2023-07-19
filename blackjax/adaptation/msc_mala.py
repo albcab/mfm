@@ -5,46 +5,12 @@ from typing import Callable
 import jax
 from jax.flatten_util import ravel_pytree
 
+from blackjax.adaptation.msc import base
 from blackjax.mcmc.mala import build_kernel, init
 from blackjax.adaptation.chain_adaptation import cross_chain, ChainState
 from blackjax.adaptation.atess import optimize
 from blackjax.base import AdaptationAlgorithm
 from blackjax.types import PyTree, PRNGKey
-
-
-def base(
-    kernel_factory,
-    optim,
-    loss,
-    num_batch: int,
-    batch_size: int,
-    n_iter: int = 10,
-):
-    def parameter_gn(batch_state, current_iter, param, state):
-        batch_position = batch_state.position
-        param_state, loss_value = optimize(
-            param,
-            state,
-            loss,
-            optim,
-            n_iter,
-            batch_position,
-        )
-        return param_state
-
-    init, update = cross_chain(
-        kernel_factory, parameter_gn, num_batch * batch_size, jax.vmap
-    )
-
-    def final(last_state: ChainState, param_state: PyTree) -> PyTree:
-        param_state = parameter_gn(
-            last_state.states,
-            last_state.current_iter,
-            *param_state,
-        )
-        return kernel_factory(*param_state), param_state[0]
-
-    return init, update, final
 
 
 def msc_mala(
@@ -59,6 +25,7 @@ def msc_mala(
     num_steps: int = 1000,
     n_iter: int = 1,
     num_mala_samples: int = 1,
+    get_loss = None,
 ) -> AdaptationAlgorithm:
 
     kernel = build_kernel()
@@ -82,6 +49,7 @@ def msc_mala(
         num_batch,
         batch_size,
         n_iter,
+        get_loss,
     )
 
     init_batch = jax.vmap(lambda pp: init(pp, logprob_fn))

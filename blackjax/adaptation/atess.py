@@ -133,12 +133,16 @@ def atess(
     return AdaptationAlgorithm(run)  # type: ignore[arg-type]
 
 
-def optimize(param, state, loss, optim, n_iter, positions):
-    def step_fn(carry, i):
+def optimize(param, state, loss, optim, n_iter, positions=None, key=None):
+    def step_fn(carry, key):
         params, opt_state = carry
-        loss_value, grads = jax.value_and_grad(loss)(params, positions)
+        if positions is not None:
+            loss_value, grads = jax.value_and_grad(loss)(params, positions)
+        else:
+            loss_value, grads = jax.value_and_grad(loss)(params, key)
         updates, opt_state_ = optim.update(grads, opt_state, params)
         params_ = optax.apply_updates(params, updates)
+        # return (params_, opt_state_), loss_value
         return jax.lax.cond(
             jnp.isfinite(loss_value)
             & jnp.isfinite(jax.flatten_util.ravel_pytree(grads)[0]).all(),
@@ -146,6 +150,9 @@ def optimize(param, state, loss, optim, n_iter, positions):
             lambda _: ((params, opt_state), jnp.nan),
             None,
         )
-
-    param_state, loss_value = jax.lax.scan(step_fn, (param, state), jnp.arange(n_iter))
+    if key is None:
+        param_state, loss_value = jax.lax.scan(step_fn, (param, state), jnp.arange(n_iter))
+    else:
+        keys = jax.random.split(key, n_iter)
+        param_state, loss_value = jax.lax.scan(step_fn, (param, state), keys)
     return param_state, loss_value

@@ -18,17 +18,28 @@ def base(
     num_batch: int,
     batch_size: int,
     n_iter: int = 10,
+    get_loss = None,
 ):
-    def parameter_gn(batch_state, current_iter, param, state):
+    def parameter_gn(batch_state, key, param, state):
         batch_position = batch_state.position
-        param_state, loss_value = optimize(
-            param,
-            state,
-            loss,
-            optim,
-            n_iter,
-            batch_position,
-        )
+        if get_loss is None:
+            param_state, loss_value = optimize(
+                param,
+                state,
+                loss,
+                optim,
+                n_iter,
+                batch_position,
+            )
+        else:
+            param_state, loss_value = optimize(
+                param,
+                state,
+                get_loss(batch_position),
+                optim,
+                n_iter,
+                key=key,
+            )
         return param_state
 
     init, update = cross_chain(
@@ -57,6 +68,7 @@ def msc(
     num_steps: int = 1000,
     n_iter: int = 1,
     num_importance_samples: int = 1,
+    get_loss = None,
 ) -> AdaptationAlgorithm:
 
     kernel = build_kernel(num_importance_samples)
@@ -79,6 +91,7 @@ def msc(
         num_batch,
         batch_size,
         n_iter,
+        get_loss,
     )
 
     init_batch = jax.vmap(lambda pp: init(pp))
@@ -100,6 +113,6 @@ def msc(
         )
         kernel, param = final(last_state, parameters)
 
-        return last_state, kernel, param#warmup_states
+        return last_state, kernel, param, info#warmup_states
 
     return AdaptationAlgorithm(run)  # type: ignore[arg-type]

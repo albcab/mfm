@@ -1,6 +1,6 @@
 """Public API for General Cross-Chain Adaptations"""
 
-from typing import Callable, NamedTuple, Tuple
+from typing import Callable, NamedTuple, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -10,7 +10,7 @@ from blackjax.types import PRNGKey, PyTree
 
 class ChainState(NamedTuple):
     states: NamedTuple
-    current_iter: int
+    current_iter: Union[int, PRNGKey]
 
 
 def cross_chain(
@@ -19,7 +19,7 @@ def cross_chain(
     num_chain: int,
     batch_fn: Callable = jax.vmap,
 ):
-    def init(initial_states: NamedTuple) -> ChainState:
+    def init(initial_states: NamedTuple, seed: int = 0) -> ChainState:
         check_leaves_shape = jax.tree_util.tree_leaves(
             jax.tree_util.tree_map(lambda s: s.shape[0] == num_chain, initial_states)
         )
@@ -27,16 +27,17 @@ def cross_chain(
             raise ValueError(
                 "Cross-chain adaptation got inconsistent sizes for array axes on *State. Every array's shape must be of the form (num_chain, ...)"
             )
-        return ChainState(initial_states, 0)
+        return ChainState(initial_states, jax.random.PRNGKey(0))
 
     def update(
         rng_key: PRNGKey, state: ChainState, *param
     ) -> Tuple[ChainState, PyTree, NamedTuple]:
-        parameters = parameter_gn(state.states, state.current_iter, *param)
+        new_key, key = jax.random.split(state.current_iter)
+        parameters = parameter_gn(state.states, key, *param)
         kernel = batch_fn(kernel_factory(*parameters))
         keys = jax.random.split(rng_key, num_chain)
         new_states, infos = kernel(keys, state.states)
-        return ChainState(new_states, state.current_iter + 1), parameters, infos
+        return ChainState(new_states, new_key), parameters, infos
 
     return init, update
 
