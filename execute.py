@@ -241,7 +241,7 @@ def run_msc(
     k_warm, k_sample = jrnd.split(rng_key)
     if n_warm > 0:
         warmup = msc(logprob_fn, optim, init_param, flow, forward, batch_iter, batch_size, n_warm, maxiter, num_importance_samples=num_importance_samples)
-        chain_state, kernel, param = warmup.run(k_warm, init_position)
+        chain_state, kernel, param, info = warmup.run(k_warm, init_position)
         init_state = chain_state.states
     else:
         init, kernel = cis(logprob_fn, lambda u: (u, 0))
@@ -255,6 +255,12 @@ def run_msc(
 
     sec = (tic2 - tic1).total_seconds()
     # do_summary(samples, logprob_fn, sec)
+    weights = info.weights.reshape(batch_iter * batch_size * n_warm, num_importance_samples + 1)
+    weights /= weights.sum(axis=1).reshape(-1, 1)
+    print("Average weights warm=", weights.mean(axis=0))
+    weights = infos.weights.reshape(batch_iter * batch_size * n_iter, num_importance_samples + 1)
+    weights /= weights.sum(axis=1).reshape(-1, 1)
+    print("Average weights iter=", weights.mean(axis=0))
     print("Runtime for MSC CIS", (tic2 - tic1).total_seconds())
     return samples, param
 
@@ -267,13 +273,9 @@ def run_msc_mala(
 ):
     tic1 = pd.Timestamp.now()
     k_warm, k_sample = jrnd.split(rng_key)
-    if n_warm > 0:
-        warmup = msc_mala(logprob_fn, optim, init_param, flow, forward, batch_iter, batch_size, step_size, n_warm, maxiter, num_mala_samples=num_mala_samples)
-        chain_state, kernel, param, info = warmup.run(k_warm, init_position)
-        init_state = chain_state.states
-    else:
-        init, kernel = cis(logprob_fn, lambda u: (u, 0))
-        init_state = jax.vmap(init)(init_position)
+    warmup = msc_mala(logprob_fn, optim, init_param, flow, forward, batch_iter, batch_size, step_size, n_warm, maxiter, num_mala_samples=num_mala_samples)
+    chain_state, kernel, param, info = warmup.run(k_warm, init_position)
+    init_state = chain_state.states
     def one_chain(k_sam, init_state):
         state, info = inference_loop0(k_sam, init_state, kernel, n_iter)
         return state.position, info

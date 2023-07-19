@@ -12,6 +12,9 @@ import haiku as hk
 from execute import do_summary
 
 from blackjax.mcmc.mala import mala
+from blackjax.adaptation.msc import msc
+from blackjax.adaptation.msc_mala import msc_mala
+from mcmc_utils import inference_loop0
 from fmx.data import flow_matching
 from fmx.sampling import flow_matching as flow_matching_sampling
 
@@ -50,7 +53,9 @@ def run(dist, args, N_PARAM, optim, ot_flow=False, prior_gn=None):
     dist.initialize_model(key_init, n_chain)
     non_lin = non_lins[args.non_linearity]
 
-    odeintegrator = lambda func, x0: odeint(func, x0, jnp.linspace(0.0, 1.0, 11))
+    odeintegrator = lambda func, x0: odeint(func, x0, jnp.linspace(0.0, 1.0, 2), rtol=1e-5, atol=1e-5, mxstep=1000)
+    _flow_matching_fn = lambda data, apply_fn, trace_fn: flow_matching(
+        apply_fn, data, odeint=odeintegrator, reference_gn=None, vector_field_with_jacobian_trace=trace_fn)
 
     if ot_flow:
         step_size = 1.
@@ -101,31 +106,30 @@ def run(dist, args, N_PARAM, optim, ot_flow=False, prior_gn=None):
             traceAtA = jnp.sum(jnp.square(reduA))
             return -grad_potential[:N_PARAM], -(t0 + step_size * t1 + traceAtA)
         
-        flow_matching_fn = lambda data: flow_matching(apply_fn, data, reference_gn=None, vector_field_with_jacobian_trace=vector_field_with_jacobian_trace)
+        flow_matching_fn = lambda data: _flow_matching_fn(data, apply_fn, vector_field_with_jacobian_trace)
 
     else:
-        def mlp_vector_field(time, sample):  # , frequencies=3):
+        def mlp_vector_field(time, sample):
             (out_dim,) = sample.shape
-            mlp = mlp_generator(out_dim, hidden_dims=args.n_hidden, non_linearity=non_lin)
-            # frequencies = 2 ** jnp.arange(frequencies) * jnp.pi
-            # input = jnp.hstack([jnp.cos(frequencies * time), jnp.sin(frequencies * time), sample])
+            # mlp = mlp_generator(out_dim, hidden_dims=args.n_hidden, non_linearity=non_lin)
+            mlp = hk.nets.MLP(args.n_hidden + [out_dim], activation=non_lin)
             input = jnp.hstack([time, sample])
             return mlp(input)
 
         vector_field = hk.without_apply_rng(hk.transform(mlp_vector_field))
         vector_field_params = vector_field.init(key_init, 0.0, jnp.zeros(N_PARAM))
-        flow_matching_fn = lambda data: flow_matching(vector_field.apply, data, reference_gn=None, vector_field_with_jacobian_trace=None)
         apply_fn = vector_field.apply
+        flow_matching_fn = lambda data: _flow_matching_fn(data, apply_fn, None)
 
     if prior_gn is not None:
         prior_samples = 1000
         precond_iter = args.preconditon_iter
         vector_field_params = prior_precondition(key_precond, prior_gn, prior_samples, 
             precond_iter, flow_matching_fn, vector_field_params, optim)
-    mc_samples = batch_iter * batch_size
-    precond_iter = n_warm * args.max_iter #args.preconditon_iter
-    vi_vector_field_params = variational_inference(key_precond, dist.init_params, dist.logprob_fn,
-        mc_samples, precond_iter, flow_matching_fn, vector_field_params, optim)
+    # mc_samples = batch_iter * batch_size
+    # precond_iter = n_warm * args.max_iter #args.preconditon_iter
+    # vi_vector_field_params = variational_inference(key_precond, dist.init_params, dist.logprob_fn,
+    #     mc_samples, precond_iter, flow_matching_fn, vector_field_params, optim)
         
     print("Base CNF")
     base_cnf_out = base_cnf(key_sample, dist.logprob_fn, dist.init_params, n_warm, n_iter, 
@@ -139,6 +143,14 @@ def run(dist, args, N_PARAM, optim, ot_flow=False, prior_gn=None):
     # algo_3_out_nr = algo_3(key_sample, dist.logprob_fn, dist.init_params,
     #     n_warm, n_iter, vector_field, vector_field_params, optim, n_chain, args.sample_iter, args.step_size[1], args.max_iter, False)
     
+    print("Algorithm 4")
+    algo_4_out_cis = algo_4(key_sample, dist.logprob_fn, dist.init_params, n_warm, n_iter, 
+        flow_matching_fn, vector_field_params, optim, batch_iter, batch_size, args.max_iter, args.sample_iter)
+
+    print("Algorithm 3 w/ MALA (refresh)")
+    algo_4_out_mala = algo_4(key_sample, dist.logprob_fn, dist.init_params, n_warm, n_iter, 
+        flow_matching_fn, vector_field_params, optim, batch_iter, batch_size, args.max_iter, args.sample_iter, args.step_size[2])
+
     # print("Algorithm 2 w/ adjoint gradients")
     # algo_2_out_a = algo_2(key_sample, dist.logprob_fn, one_init_position, n_warm, n_iter, 
     #     vector_field, vector_field_params, optim, n_chain, args.sample_iter, args.step_size[0], args.max_iter)
@@ -147,7 +159,7 @@ def run(dist, args, N_PARAM, optim, ot_flow=False, prior_gn=None):
     # print("Algorithm 2 w/ discretize-then-optimize")
     # algo_2_out_dto = algo_2(key_sample, dist.logprob_fn, one_init_position,
     #     n_warm, n_iter, vector_field, vector_field_params, optim, n_chain, args.sample_iter, args.step_size[0], args.max_iter, False)
-    algo_2_out_dto = (algo_3_out_r[0], vi_vector_field_params)
+    # algo_2_out_dto = (algo_3_out_r[0], vi_vector_field_params)
     print()
     
     def flow(u, param):
@@ -160,7 +172,7 @@ def run(dist, args, N_PARAM, optim, ot_flow=False, prior_gn=None):
         flow = odeintegrator(lambda x, time: apply_fn(param, 1.0 - time, x), x)
         return unravel_fn(flow[-1]), 1
     
-    return algo_2_out_a, algo_2_out_dto, algo_3_out_r, base_cnf_out, (flow, flow_inv)
+    return algo_4_out_cis, algo_4_out_mala, algo_3_out_r, base_cnf_out, (flow, flow_inv)
 
 
 def prior_precondition(rng_key, prior_gn, n_samples, n_iter, flow_matching_fn, init_params, optim):
@@ -263,6 +275,48 @@ def algo_3(rng_key, logprob_fn, init_position, n_warm, n_iter, flow_matching_fn,
     print("Average and std acceptance rates iter=", iter_acc.mean(), iter_acc.std())
     print("Runtime for Algo 3", (tic2 - tic1).total_seconds())
     return samples, params
+
+
+def algo_4(rng_key, logprob_fn, init_position, n_warm, n_iter, flow_matching_fn,
+    init_param, optim, batch_iter, batch_size, maxiter, num_samples, step_size=None):
+    fmx = flow_matching_fn(init_position)
+    flow = fmx.transform_and_logdet
+    def get_fm_loss(positions):
+        fmx = flow_matching_fn(positions)
+        return lambda param, key: fmx.loss(key, param, batch_iter * batch_size)
+
+    tic1 = pd.Timestamp.now()
+    k_warm, k_sample = jax.random.split(rng_key)
+    if step_size is not None:
+        warmup = msc_mala(logprob_fn, optim, init_param, flow, None, batch_iter, batch_size, 
+            step_size, n_warm, maxiter, num_mala_samples=num_samples, get_loss=get_fm_loss)
+    else:
+        warmup = msc(logprob_fn, optim, init_param, flow, None, batch_iter, batch_size, 
+            n_warm, maxiter, num_importance_samples=num_samples, get_loss=get_fm_loss)
+    chain_state, kernel, param, info = warmup.run(k_warm, init_position)
+    init_state = chain_state.states
+    def one_chain(k_sam, init_state):
+        state, info = inference_loop0(k_sam, init_state, kernel, n_iter)
+        return state.position, info
+    k_sample = jax.random.split(k_sample, batch_iter * batch_size)
+    samples, infos = jax.vmap(one_chain)(k_sample, init_state)
+    tic2 = pd.Timestamp.now()
+
+    sec = (tic2 - tic1).total_seconds()
+    # do_summary(samples, logprob_fn, sec)
+    if step_size is None:
+        weights = info.weights.reshape(batch_iter * batch_size * n_warm, num_samples + 1)
+        weights /= weights.sum(axis=1).reshape(-1, 1)
+        print("Average weights warm=", weights.mean(axis=0))
+        weights = infos.weights.reshape(batch_iter * batch_size * n_iter, num_samples + 1)
+        weights /= weights.sum(axis=1).reshape(-1, 1)
+        print("Average weights iter=", weights.mean(axis=0))
+        print("Runtime for MSC CIS", (tic2 - tic1).total_seconds())
+    else:
+        print("Average and std acceptance rates warm=", info.acceptance_rate.mean(), info.acceptance_rate.std())
+        print("Average and std acceptance rates iter=", infos.acceptance_rate.mean(), infos.acceptance_rate.std())
+        print("Runtime for MSC MALA", (tic2 - tic1).total_seconds())
+    return samples, param
 
 
 def base_cnf(rng_key, logprob_fn, init_position, n_warm, n_iter, flow_matching_fn, 
