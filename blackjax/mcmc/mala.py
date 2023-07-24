@@ -44,6 +44,8 @@ class MALAInfo(NamedTuple):
 
     acceptance_rate: float
     is_accepted: bool
+    proposed_position: PyTree
+    proposed_weight: float
 
 
 def init(position: PyTree, logdensity_fn: Callable) -> MALAState:
@@ -99,7 +101,19 @@ def build_kernel():
             key_rmh, proposal, new_proposal
         )
 
-        info = MALAInfo(p_accept, do_accept)
+        theta = jax.tree_util.tree_map(
+            lambda new_x, x, g: new_x - x - step_size * g,
+            state.position,
+            new_state.position,
+            new_state.logdensity_grad,
+        )
+        theta_dot = jax.tree_util.tree_reduce(
+            operator.add, jax.tree_util.tree_map(lambda x: jnp.sum(x * x), theta)
+        )
+        proposed_weight = jnp.exp(new_state.logdensity + 0.25 * (1.0 / step_size) * theta_dot)
+        proposed_position = new_state.position
+
+        info = MALAInfo(p_accept, do_accept, proposed_position, proposed_weight)
 
         return sampled_proposal.state, info
 
