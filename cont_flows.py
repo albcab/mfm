@@ -31,7 +31,7 @@ non_lins = {
 }
 
 
-def mlp_flow(key_init, args, N_PARAM):
+def mlp_flow(key_init, args, N_PARAM, grad_logporob):
     n_chain = args.num_chain
     non_lin = non_lins[args.non_linearity]
 
@@ -59,6 +59,9 @@ def mlp_flow(key_init, args, N_PARAM):
         # net = hk.nets.ResNet18(dim, resnet_v2=True, bn_config={'decay_rate': 0.9})
         net = hk.nets.MLP(args.hidden_layers + [dim], activation=non_lin)
         input = jnp.concatenate([samples, times.reshape(batch_size, 1)], axis=1)#.reshape(batch_size, dim + 1, 1, 1)
+        # ngrad_logprobs = jax.vmap(lambda s: -grad_logporob(s))(samples)
+        # batched_times = times.reshape(batch_size, 1)
+        # input = jnp.concatenate([samples, ngrad_logprobs, batched_times], axis=1)#.reshape(batch_size, dim + 1, 1, 1)
         return jax.vmap(net)(input)
         # input = jax.vmap(get_input)(samples, times)
         # return net(input, is_training=is_training)

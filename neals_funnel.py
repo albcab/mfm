@@ -66,6 +66,8 @@ def plots(param, state, others, flow, flow_inv, dist, real):
         sns.histplot(x=x1, y=x2[:, i], ax=ax[0], bins=50)
         data.append(wandb.Image(fig))
         plt.close()
+        if i > 8:
+            break #only the first 10 dimensions
 
     return data
 
@@ -143,7 +145,7 @@ def main(args):
     my_data.append(["Base 6.2 mod"] + data)
     # plt.savefig("NealsFunnel Base CNF mod.png", bbox_inches='tight')
     # plt.close()
-    columns = ["Algorithm", "logpdf", "KSD U-stat", "KSD V-stat", "MMD", "time (sec)", "avg accept", "std accept"] + ["plot (x0,x" + str(i+1) + ")" for i in range(N_PARAM-1)]
+    columns = ["Algorithm", "logpdf", "KSD U-stat", "KSD V-stat", "MMD", "time (sec)", "avg accept", "std accept"] + ["plot (x0,x" + str(i+1) + ")" for i in range(min(N_PARAM-1, 10))]
     wandb.log({"summary": wandb.Table(columns, my_data)})
     wandb.finish()
 

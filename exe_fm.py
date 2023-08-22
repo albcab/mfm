@@ -38,7 +38,8 @@ def run(dist, args, N_PARAM, optim, target_gn=None):
     dist.initialize_model(key_init, n_chain)
 
     odeintegrator = lambda func, x0: odeint(func, x0, jnp.linspace(0.0, 1.0, 2), rtol=1e-5, atol=1e-5, mxstep=1000)
-    vector_field_params, vector_field_state, apply_fn, vector_field_with_jacobian_trace = cflows[args.cont_flow](key_init, args, N_PARAM)
+    vector_field_params, vector_field_state, apply_fn, vector_field_with_jacobian_trace = cflows[args.cont_flow](
+        key_init, args, N_PARAM, jax.grad(lambda input: dist.logprob(input[0], input[1:])))
     flow_matching_fn = lambda data, weights=None: flow_matching(
         apply_fn, data, weights, odeint=odeintegrator, reference_gn=None, vector_field_with_jacobian_trace=vector_field_with_jacobian_trace)
 
@@ -51,7 +52,7 @@ def run(dist, args, N_PARAM, optim, target_gn=None):
         
         vi_out = prior_precondition(key_sample, target_gn, n_chain, args.sampler_iter, 
             n_warm, args.optim_iter, flow_matching_fn, vector_field_params, vector_field_state, optim, check_target)
-        # vector_field_params, vector_field_state = vi_out
+        # vector_field_params, vector_field_state = vi_out[:2]
     else:
         vi_out = (vector_field_params, vector_field_state)
         check_target = lambda p, s: jnp.nan
