@@ -40,14 +40,22 @@ def run(dist, args, N_PARAM, optim, target_gn=None):
     odeintegrator = lambda func, x0: odeint(func, x0, jnp.linspace(0.0, 1.0, 2), rtol=1e-5, atol=1e-5, mxstep=1000)
     vector_field_params, vector_field_state, apply_fn, vector_field_with_jacobian_trace = cflows[args.cont_flow](
         key_init, args, N_PARAM, jax.grad(lambda input: dist.logprob(input[0], input[1:])))
-    flow_matching_fn = lambda data, weights=None: flow_matching(
-        apply_fn, data, weights, odeint=odeintegrator, reference_gn=None, vector_field_with_jacobian_trace=vector_field_with_jacobian_trace)
+    def weight_reg(params):
+        flat_params = ravel_pytree(params)[0]
+        if args.l2:
+            return args.lamda * (flat_params ** 2).sum()
+        else:
+            return args.lamda * jnp.abs(flat_params).sum()
+    flow_matching_fn = lambda data, weights=None: flow_matching(apply_fn, data, weights, 
+        odeint=odeintegrator, reference_gn=None, vector_field_with_jacobian_trace=vector_field_with_jacobian_trace,
+        weight_regularizer=weight_reg)
 
     if target_gn is not None:
         key_gen, key_loss = jax.random.split(key_target)
-        keys_target = jax.random.split(key_gen, n_iter)
+        keys_target = jax.random.split(key_gen, n_iter * n_chain)
         real_samples = jax.vmap(target_gn)(keys_target)
-        fmx = flow_matching_fn(jnp.expand_dims(real_samples, 1))
+        fmx = flow_matching(apply_fn, jnp.expand_dims(real_samples, 1), None, odeint=odeintegrator, 
+            reference_gn=None, vector_field_with_jacobian_trace=vector_field_with_jacobian_trace)
         check_target = lambda params, state: fmx.loss(key_loss, params, state, is_training=False)[0]
         
         vi_out = prior_precondition(key_sample, target_gn, n_chain, args.sampler_iter, 
@@ -77,6 +85,10 @@ def run(dist, args, N_PARAM, optim, target_gn=None):
     print("Algorithm 3 mod")
     algo_3_out_mod = algo_3(key_sample, dist.logprob_fn, dist.init_params, n_warm, 
         flow_matching_fn, vector_field_params, vector_field_state, optim, n_chain, args.sampler_iter, args.step_size, args.optim_iter, check_target, True)
+
+    print("Algorithm 3.1")
+    algo_3_1_out = algo_3_1(key_sample, dist.logprob_fn, dist.init_params, n_warm, 
+        flow_matching_fn, vector_field_params, vector_field_state, optim, n_chain, args.sampler_iter, args.step_size, args.optim_iter, check_target)
     
     # print("Algorithm 3 w/o refresh")
     # algo_3_out_nr = algo_3(key_sample, dist.logprob_fn, dist.init_params,
@@ -122,7 +134,7 @@ def run(dist, args, N_PARAM, optim, target_gn=None):
     #     flow = odeintegrator(lambda x, time: apply_fn(param, state, (1.0 - time) * jnp.ones(batch_size), x, is_training=False)[0], X)
     #     return jax.vmap(unravel_fn)(flow[-1]), jnp.ones(batch_size)
     
-    return vi_out, algo_3_out_mod, algo_3_out_r, base_cnf_out, base_mod_out, (flow, flow_inv)
+    return vi_out, algo_3_out_mod, algo_3_out_r, base_cnf_out, base_mod_out, algo_3_1_out, (flow, flow_inv)
 
 
 def prior_precondition(rng_key, prior_gn, batch_size, n_samples, epochs, n_iter, flow_matching_fn, init_params, init_state, optim, check_target):
@@ -253,6 +265,61 @@ def algo_3(rng_key, logprob_fn, init_position, n_warm, flow_matching_fn,
     wandb.log({targ_name: wandb.plot.line(targ_table, *targ_cols, title=targ_name)})
     lss_cols = ["epoch", "avg loss"]
     lss_name = 'loss/Algo 3' + (' mod' if mod else '')
+    lss_table = wandb.Table(lss_cols, lss)
+    wandb.log({lss_name: wandb.plot.line(lss_table, *lss_cols, title=lss_name)})
+    return params, state, (sec, acc.mean(), acc.std())
+
+
+def algo_3_1(rng_key, logprob_fn, init_position, n_warm, flow_matching_fn, 
+    init_params, init_state, optim, n_chain, sample_iter, step_size, optim_iter, check_target):
+    kernel = mala(logprob_fn, step_size)
+    mapped_init = jax.vmap(kernel.init)
+    init_positions = jax.tree_util.tree_map(lambda p: jnp.repeat(jnp.expand_dims(p, 1), n_warm, axis=1), init_position)
+    init_weights = jnp.zeros((n_chain, n_warm))
+    fmx_init = flow_matching_fn(init_positions, init_weights)
+
+    def one_iter(carry, i):
+        _, optim_state, params, state, positions, weights, keys = carry
+        k_init, k_sample, k_optim = jax.random.split(keys[i], 3)
+        sampled_positions = fmx_init.sample(k_init, params, state, n_chain, is_training=False)
+        states = mapped_init(sampled_positions)
+        states, (sstates, infos) = sampling_loop(k_sample, states, kernel.step, n_chain, sample_iter)
+        positions = jax.tree_util.tree_map(lambda p, s: p.at[:, i, ...].set(s), positions, states.position)
+        weights = weights.at[:, i].set(jnp.ones(n_chain))
+        fmx = flow_matching_fn(positions, weights)
+        def one_optim_iter(carry, key):
+            optim_state, params, state = carry
+            (loss_value, state), grads = jax.value_and_grad(fmx.loss, 1, has_aux=True)(key, params, state, is_training=True)
+            updates, optim_state = optim.update(grads, optim_state, params)
+            params = optax.apply_updates(params, updates)
+            return (optim_state, params, state), loss_value
+        ks_optim = jax.random.split(k_optim, optim_iter)
+        (optim_state, params, state), loss_value = jax.lax.scan(
+            one_optim_iter, (optim_state, params, state), ks_optim)
+        target_loss = check_target(params, state)
+        return (states, optim_state, params, state, positions, weights, keys), (target_loss, loss_value, infos.acceptance_rate)
+
+    tic1 = pd.Timestamp.now()
+    init_states = mapped_init(init_position)
+    keys = jax.random.split(rng_key, n_warm)
+    optim_state = optim.init(init_params)
+    (_, optim_state, params, state, *_), (target_losses, losses, acc) = jax.lax.scan(
+        one_iter, (init_states, optim_state, init_params, init_state, init_positions, init_weights, keys), jnp.arange(n_warm))
+    tic2 = pd.Timestamp.now()
+
+    sec = (tic2 - tic1).total_seconds()
+    print("Average and std acceptance rates warm=", acc.mean(), acc.std())
+    print("Runtime for Algo 3\.1", sec)
+    targ, lss = [], []
+    for i, (tl, ls) in enumerate(zip(target_losses, losses)):
+        targ.append([i, tl])
+        lss.append([i, ls.mean()])
+    targ_cols = ["epoch", "target loss"]
+    targ_name = 'target loss/Algo 3\.1'
+    targ_table = wandb.Table(targ_cols, targ)
+    wandb.log({targ_name: wandb.plot.line(targ_table, *targ_cols, title=targ_name)})
+    lss_cols = ["epoch", "avg loss"]
+    lss_name = 'loss/Algo 3\.1'
     lss_table = wandb.Table(lss_cols, lss)
     wandb.log({lss_name: wandb.plot.line(lss_table, *lss_cols, title=lss_name)})
     return params, state, (sec, acc.mean(), acc.std())

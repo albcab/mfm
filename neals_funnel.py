@@ -145,6 +145,10 @@ def main(args):
     my_data.append(["Base 6.2 mod"] + data)
     # plt.savefig("NealsFunnel Base CNF mod.png", bbox_inches='tight')
     # plt.close()
+    print("MSC Flow matching with incremental training data:")
+    data = plots(*algos[5], *flows, dist, samples)
+    my_data.append(["Algo 3.1"] + data)
+
     columns = ["Algorithm", "logpdf", "KSD U-stat", "KSD V-stat", "MMD", "time (sec)", "avg accept", "std accept"] + ["plot (x0,x" + str(i+1) + ")" for i in range(min(N_PARAM-1, 10))]
     wandb.log({"summary": wandb.Table(columns, my_data)})
     wandb.finish()
@@ -193,5 +197,9 @@ if __name__ == "__main__":
     parser.add_argument('-dr', '--decay-rate', type=float, default=0.1)
     parser.add_argument('-gc', '--gradient-clip', type=float, default=1.0)
     parser.add_argument('-td', '--target-dimension', type=int, default=2)
+    parser.add_argument('-l', '--lamda', type=float, default=0.1)
+    parser.add_argument('--l2', dest='l2', action='store_true')
+    parser.add_argument('--l1', dest='l2', action='store_false')
+    parser.set_defaults(l2=True)
     args = parser.parse_args()
     main(args)

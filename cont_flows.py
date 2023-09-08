@@ -5,9 +5,9 @@ import jax.numpy as jnp
 import haiku as hk
 
 
-scale_W = 0.1
+scale_W = 0.01
 init_W = hk.initializers.VarianceScaling(scale_W)
-scale_b = 0.01
+scale_b = 0.0
 init_b = hk.initializers.RandomNormal(scale_b)
 
 
@@ -58,11 +58,12 @@ def mlp_flow(key_init, args, N_PARAM, grad_logporob):
         batch_size, dim = samples.shape
         # net = hk.nets.ResNet18(dim, resnet_v2=True, bn_config={'decay_rate': 0.9})
         net = hk.nets.MLP(args.hidden_layers + [dim], activation=non_lin)
-        input = jnp.concatenate([samples, times.reshape(batch_size, 1)], axis=1)#.reshape(batch_size, dim + 1, 1, 1)
+        net_t = hk.nets.MLP([1, 1], activation=non_lin)
+        batched_times = times.reshape(batch_size, 1)
+        input = jnp.concatenate([samples, batched_times], axis=1)#.reshape(batch_size, dim + 1, 1, 1)
         # ngrad_logprobs = jax.vmap(lambda s: -grad_logporob(s))(samples)
-        # batched_times = times.reshape(batch_size, 1)
         # input = jnp.concatenate([samples, ngrad_logprobs, batched_times], axis=1)#.reshape(batch_size, dim + 1, 1, 1)
-        return jax.vmap(net)(input)
+        return jax.vmap(net)(input) + jax.vmap(net_t)(batched_times) * jax.vmap(grad_logporob)(samples)
         # input = jax.vmap(get_input)(samples, times)
         # return net(input, is_training=is_training)
 
