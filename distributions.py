@@ -315,3 +315,31 @@ class MultivarNormal(BiDistribution):
         return multivariate_normal.logpdf(
             jnp.array([x1, x2]), self._mean, self._cov,
         )
+    
+class GaussianMixture(Distribution):
+    def __init__(self, 
+        modes=[2. * jnp.ones(2), -2. * jnp.ones(2)],
+        covs=[.5 * jnp.eye(2), .5 * jnp.eye(2)],
+        weights=.5 * jnp.ones(2)
+    ) -> None:
+        self.dim, = modes[0].shape
+        self.modes = modes
+        self.modes_array = jnp.concatenate([jnp.expand_dims(mode, 0) for mode in modes])
+        self.covs = covs
+        self.chol_covs = jnp.concatenate([jnp.expand_dims(jnp.linalg.cholesky(cov), 0) for cov in covs])
+        self.weights = weights
+    
+    def logprob(self, x):
+        pdf = 0.
+        for m, c, w in zip(self.modes, self.covs, self.weights):
+            pdf += w * multivariate_normal.pdf(x, m, c)
+        return jnp.log(pdf)
+    
+    def initialize_model(self, rng_key, n_chain):
+        keys = jax.random.split(rng_key, n_chain)
+        self.init_params = jax.vmap(lambda k: jax.random.normal(k, (self.dim,)))(keys)
+    
+    def sample_model(self, rng_key):
+        key_choice, key_dist = jax.random.split(rng_key)
+        choice = jax.random.choice(key_choice, len(self.modes), p=self.weights)
+        return self.modes_array.at[choice].get() + self.chol_covs.at[choice].get() @ jax.random.normal(key_dist, (self.dim,))
