@@ -20,8 +20,8 @@ def main(args):
 
     print("Setting up Gaussian mixture density...")
     modes = [5. * jnp.ones(N_PARAM), -5. * jnp.zeros(N_PARAM)]
-    covs = [2. * jnp.eye(N_PARAM), 2. * jnp.eye(N_PARAM)]
-    weights = jnp.array([0.5, 0.5])
+    covs = [.5 * jnp.eye(N_PARAM), .5 * jnp.eye(N_PARAM)]
+    weights = jnp.array([0.7, 0.3])
     dist = GaussianMixture(modes, covs, weights)
 
     print("Running algorithm...")
@@ -39,6 +39,12 @@ if __name__ == "__main__":
     parser.add_argument("--fourier_std", type=float, default=1.0)
     parser.add_argument('--hutchs', dest='hutchs', action='store_true')
     parser.set_defaults(hutchs=False)
+
+    parser.add_argument("--ref_dist", type=str, default=None)
+    parser.add_argument('--cond_flow', dest='cond_flow', action='store_true')
+    parser.set_defaults(cond_flow=False)
+    parser.add_argument('--ot_cond_flow', dest='ot_cond_flow', action='store_true')
+    parser.set_defaults(ot_cond_flow=False)
 
     parser.add_argument("--mcmc_per_flow_steps", type=float, default=10)
     parser.add_argument('--num_chain', type=int, default=16)
