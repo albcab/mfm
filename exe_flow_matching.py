@@ -20,10 +20,10 @@ from ott.solvers.linear import sinkhorn
 import wandb
 from tqdm import tqdm
 
-from blackjax.mcmc.mala import mala, MALAState, MALAInfo
+from blackjax.mcmc.mala import init, build_kernel, MALAState, MALAInfo
 from mcmc_utils import stein_disc, max_mean_disc
 
-from distributions import GaussianMixture
+from distributions import GaussianMixture, IndepGaussian
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -40,7 +40,9 @@ non_lins = {
 }
 
 ref_dists = {
-    'bimodal': GaussianMixture(),
+    'stdgauss': lambda dim: IndepGaussian(dim),
+    'widegauss': lambda dim: IndepGaussian(dim, var=5.),
+    'bimodal': lambda dim: GaussianMixture(dim),
 }
 
 class VectorFieldNet(nn.Module):
@@ -132,17 +134,13 @@ def create_train_state(
         target_vector_fields = samples - (1 - args.sigma) * ref_samples
         return times, cond_samples, target_vector_fields
 
-    if args.ref_dist is not None:
-        dist = ref_dists[args.ref_dist]
+    ref_dist = ref_dists[args.ref_dist](args.dim)
 
     def cond_flow_fn(rng_key, samples):
         batch_size, n_dim = samples.shape
         key_time, key_ref_sample, key_gaussian, key_ot = jax.random.split(rng_key, 4)
         times = jax.random.uniform(key_time, (batch_size, 1))
-        if args.ref_dist is None:
-            ref_samples = jax.random.normal(key_ref_sample, (batch_size, n_dim))
-        else:
-            ref_samples = jax.vmap(dist.sample_model)(jax.random.split(key_ref_sample, batch_size))
+        ref_samples = jax.vmap(ref_dist.sample_model)(jax.random.split(key_ref_sample, batch_size))
         if args.ot_cond_flow:
             geom = pointcloud.PointCloud(samples, ref_samples)
             ot_prob = linear_problem.LinearProblem(geom)
@@ -190,7 +188,7 @@ def create_learning_rate_fn(
 
 def create_train_data_gn(logprob_fn, initial_positions, 
         vector_field_apply, ode_integrator, args):
-    init, step = mala(logprob_fn, args.step_size)
+    kernel = build_kernel()
     batch_size, dim = initial_positions.shape
 
     def transform_and_logdet(key, ref_sample, vector_field_param, **vector_field_kwargs):
@@ -204,7 +202,7 @@ def create_train_data_gn(logprob_fn, initial_positions,
                 dldj = jnp.dot(rand_norm, jvp)
             else:
                 jacobian = jax.jacfwd(vector_field_apply, 1)(vector_field_param, u, time, **vector_field_kwargs)
-                dldj = jnp.einsum("ii", jacobian)
+                dldj = jnp.trace(jacobian)
             return du, -dldj
 
         flow, ldj_flow = ode_integrator(augmented_vector_field, (ref_sample, jnp.zeros(())))
@@ -214,61 +212,60 @@ def create_train_data_gn(logprob_fn, initial_positions,
 
         def augmented_vector_field(x_ldj, time):
             x, _ = x_ldj
-            time = 1.0 - time
-            dx = vector_field_apply(vector_field_param, x, time, **vector_field_kwargs)
+            #instead of doing t=1 to t=0 with vector_field(x, t) we do t=-1 to t=0 with -vector_field(x, -t)
+            #or equivalently t=0 to t=1 with -vector_field(x, 1-t)
+            time = 1. - time
+            dx = -vector_field_apply(vector_field_param, x, time, **vector_field_kwargs)
             if args.hutchs:
                 rand_norm = jax.random.normal(key, (dim,))
                 _, jvp = jax.jvp(lambda x: vector_field_apply(vector_field_param, x, time, **vector_field_kwargs), (x,), (rand_norm,))
                 dldj = jnp.dot(rand_norm, jvp)
             else:
                 jacobian = jax.jacfwd(vector_field_apply, 1)(vector_field_param, x, time, **vector_field_kwargs)
-                dldj = jnp.einsum("ii", jacobian)
-            return dx, -dldj
+                dldj = jnp.trace(jacobian)
+            #negation of trace cancels out
+            return dx, dldj
 
         inv_flow, ldj_inv_flow = ode_integrator(augmented_vector_field, (target_sample, jnp.zeros(())))
         return inv_flow[-1], ldj_inv_flow[-1]
     
-    if args.ref_dist is not None:
-        dist = ref_dists[args.ref_dist]
+    ref_dist = ref_dists[args.ref_dist](dim)
 
-    def indep_metropolis_hastings(rng_key, prev_state, vector_field_param, **vector_field_kwargs):
+    def indep_metropolis_hastings(rng_key, prev_state, logprob, vector_field_param, **vector_field_kwargs):
         key_gen, key_acc, key_hutch1, key_hutch2 = jax.random.split(rng_key, 4)
         initial_position = prev_state.position
-        if args.ref_dist is None:
-            proposed_pullback = jax.random.normal(key_gen, (dim,))
-            ref_logprob = lambda pullback: -.5 * jnp.square(pullback).sum()
-        else:
-            proposed_pullback = dist.sample_model(key_gen)
-            ref_logprob = dist.logprob
+        proposed_pullback = ref_dist.sample_model(key_gen)
         proposed_position, proposed_delta_vol = transform_and_logdet(key_hutch1, proposed_pullback, vector_field_param, **vector_field_kwargs)
         initial_pullback, initial_delta_vol = inverse_and_logdet(key_hutch2, initial_position, vector_field_param, **vector_field_kwargs)
-        proposed_logdensity, proposed_logdensity_grad = jax.value_and_grad(logprob_fn)(proposed_position)
+        proposed_logdensity, proposed_logdensity_grad = jax.value_and_grad(logprob)(proposed_position)
         acceptance_prob = jnp.exp(
-            proposed_logdensity - ref_logprob(proposed_pullback) - proposed_delta_vol
-            + ref_logprob(initial_pullback) - initial_delta_vol - prev_state.logdensity
+            proposed_logdensity - ref_dist.logprob(proposed_pullback) - proposed_delta_vol
+            + ref_dist.logprob(initial_pullback) - initial_delta_vol - prev_state.logdensity
         )
         return jax.lax.cond(jax.random.uniform(key_acc) <= acceptance_prob,
             lambda _: (MALAState(proposed_position, proposed_logdensity, proposed_logdensity_grad), MALAInfo(acceptance_prob, True, proposed_position, 0.)),
             lambda _: (prev_state, MALAInfo(acceptance_prob, False, proposed_position, 0.)),
             operand=None)
     
-    def train_data_generator(rng_key, states, count, vector_field_param, **vector_field_kwargs):
+    anneal_dist = ref_dists[args.anneal_dist](dim)
+
+    def train_data_generator(rng_key, states, count, vector_field_param, beta=1., **vector_field_kwargs):
+        logprob = lambda position: beta * logprob_fn(position) + (1. - beta) * anneal_dist.logprob(position)
         keys = jax.random.split(rng_key, batch_size)
         if args.mcmc_per_flow_steps > 0 and args.mcmc_per_flow_steps < 1:
             flow_per_mcmc_steps = int(1 / args.mcmc_per_flow_steps)
             return jax.lax.cond(count % (flow_per_mcmc_steps + 1) == 0,
-                lambda _: (jax.vmap(step)(keys, states), count + 1),
-                lambda _: (jax.vmap(indep_metropolis_hastings, (0, 0, None))(keys, states, vector_field_param, **vector_field_kwargs), count + 1),
+                lambda _: jax.vmap(lambda k, s: kernel(k, s, logprob, args.step_size))(keys, states),
+                lambda _: jax.vmap(indep_metropolis_hastings, (0, 0, None, None))(keys, states, logprob, vector_field_param, **vector_field_kwargs),
                 operand=None)
         else:
             return jax.lax.cond(count % (int(args.mcmc_per_flow_steps) + 1) == 0,
-                lambda _: (jax.vmap(indep_metropolis_hastings, (0, 0, None))(keys, states, vector_field_param, **vector_field_kwargs), count + 1),
-                lambda _: (jax.vmap(step)(keys, states), count + 1),
+                lambda _: jax.vmap(indep_metropolis_hastings, (0, 0, None, None))(keys, states, logprob, vector_field_param, **vector_field_kwargs),
+                lambda _: jax.vmap(lambda k, s: kernel(k, s, logprob, args.step_size))(keys, states),
                 operand=None)
 
-    initial_states = jax.vmap(init)(initial_positions)
-    initial_count = 0
-    return train_data_generator, initial_states, initial_count
+    init_fn = lambda init_positions, beta=1.: jax.vmap(init, (0, None))(init_positions, lambda position: beta * logprob_fn(position) + (1. - beta) * anneal_dist.logprob(position))
+    return train_data_generator, init_fn
 
 
 def run(dist, args, target_gn=None):
@@ -279,7 +276,9 @@ def run(dist, args, target_gn=None):
     )
 
     use_real_samples = args.mcmc_per_flow_steps < 0
-    n_warm = args.learning_iter
+    learning_iter = args.learning_iter
+    num_temps = len(args.anneal_temp)
+    iter_per_temp = args.anneal_iter // num_temps
     n_iter = args.eval_iter
     n_chain = args.num_chain
     key_target, key_sample, key_init, key_dist, key_fourier, key_gen = jax.random.split(jax.random.PRNGKey(args.seed), 6)
@@ -295,7 +294,7 @@ def run(dist, args, target_gn=None):
     vector_field_param = model.init(key_init, dist.init_params[0], 0.)
 
     learning_rate_fn = create_learning_rate_fn(
-        n_warm,
+        learning_iter,
         args.warmup_steps,
         args.learning_rate,
     )
@@ -316,25 +315,38 @@ def run(dist, args, target_gn=None):
         eval_step = jax.jit(lambda state: state.loss_fn(key_loss, real_samples, state.params))
 
 
-    logger.info(f"===== Starting training ({n_warm} iterations) =====")
+    logger.info(f"===== Starting training ({learning_iter} iterations w/ {args.anneal_iter} annealing) =====")
 
     if use_real_samples:
         train_data_generator = lambda key, *_: jax.vmap(
-            lambda k: ((MALAState(target_gn(k), None, None), MALAInfo(jnp.nan, None, None, None)), 0)
+            lambda k: (MALAState(target_gn(k), None, None), MALAInfo(jnp.nan, None, None, None))
         )(jax.random.split(key, n_chain))
-        train_states = jax.vmap(lambda p: MALAState(p, None, None))(dist.init_params)
-        count = 0
+        init_fn = lambda positions, *_: jax.vmap(lambda p: MALAState(p, None, None))(positions)
     else:
-        train_data_generator, train_states, count = create_train_data_gn(dist.logprob, dist.init_params, 
+        train_data_generator, init_fn = create_train_data_gn(dist.logprob, dist.init_params, 
             model.apply, odeintegrator, args)
+        
+    ref_dist = ref_dists[args.ref_dist](args.dim)
+    sample_reference = lambda key: jax.vmap(ref_dist.sample_model)(jax.random.split(key, n_iter * n_chain))
         
     # train_start = time.time() #pre jit
     train_data_generator = jax.jit(train_data_generator)
+    init_fn = jax.jit(init_fn)
     train_step = jax.jit(train_step)
     train_start = time.time() #post jit
-    for _ in tqdm(range(n_warm), desc="Training..."):
+
+    if args.anneal_iter > 0 and not use_real_samples:
+        beta = args.anneal_temp.pop(0)
+    else:
+        beta = 1.
+    train_states = init_fn(dist.init_params, beta)
+    for count in tqdm(range(1, learning_iter + 1), desc="Training..."):
         key_sample, key_train_gn, key_train_step = jax.random.split(key_sample, 3)
-        (train_states, infos), count = train_data_generator(key_train_gn, train_states, count, vector_field_param)
+        if args.anneal_iter >= count and not use_real_samples:
+            if count % (iter_per_temp + 1) == 0:
+                beta = args.anneal_temp.pop(0)
+                train_states = init_fn(train_states.position, beta)
+        train_states, infos = train_data_generator(key_train_gn, train_states, count, vector_field_param, beta)
         state, train_metric = train_step(state, train_states.position, key_train_step)
         train_metric["acceptance avg."] = infos.acceptance_rate.mean()
         train_metric["acceptance std."] = infos.acceptance_rate.std()
@@ -357,10 +369,7 @@ def run(dist, args, target_gn=None):
         return flow[-1]
 
 
-    if args.ref_dist is None:
-        u = jax.random.normal(key_gen, shape=(n_iter * n_chain, dist.init_params.shape[1]))
-    else:
-        u = jax.vmap(ref_dists[args.ref_dist].sample_model)(jax.random.split(key_gen, n_iter * n_chain))
+    u = sample_reference(key_gen)
     flow_samples = jax.vmap(lambda u: flow(u, state.params))(u)
 
 

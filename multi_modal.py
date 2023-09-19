@@ -19,10 +19,10 @@ def main(args):
         job_type="mcmc_per_flow_steps=" + str(args.mcmc_per_flow_steps) + ",learning_iter=" + str(args.learning_iter))
 
     print("Setting up Gaussian mixture density...")
-    modes = [5. * jnp.ones(N_PARAM), -5. * jnp.zeros(N_PARAM)]
-    covs = [.5 * jnp.eye(N_PARAM), .5 * jnp.eye(N_PARAM)]
-    weights = jnp.array([0.7, 0.3])
-    dist = GaussianMixture(modes, covs, weights)
+    modes = [5., 0.]
+    covs = [.5, .5]
+    weights = jnp.array([.7, .3])
+    dist = GaussianMixture(N_PARAM, modes, covs, weights)
 
     print("Running algorithm...")
     run(dist, args, dist.sample_model)
@@ -40,7 +40,7 @@ if __name__ == "__main__":
     parser.add_argument('--hutchs', dest='hutchs', action='store_true')
     parser.set_defaults(hutchs=False)
 
-    parser.add_argument("--ref_dist", type=str, default=None)
+    parser.add_argument("--ref_dist", type=str, default='stdgauss')
     parser.add_argument('--cond_flow', dest='cond_flow', action='store_true')
     parser.set_defaults(cond_flow=False)
     parser.add_argument('--ot_cond_flow', dest='ot_cond_flow', action='store_true')
@@ -50,6 +50,10 @@ if __name__ == "__main__":
     parser.add_argument('--num_chain', type=int, default=16)
     parser.add_argument("--learning_iter", type=int, default=400)
     parser.add_argument("--eval_iter", type=int, default=100)
+
+    parser.add_argument("--anneal_iter", type=int, default=0)
+    parser.add_argument('--anneal_temp', type=int, nargs='+', default=[(i + 1) / 10 for i in range(10)])
+    parser.add_argument("--anneal_dist", type=str, default="stdgauss")
 
     #defaults from PIS
     parser.add_argument('--non_linearity', type=str, default='relu')
@@ -69,7 +73,7 @@ if __name__ == "__main__":
     parser.add_argument('--adam_beta2', type=float, default=0.999)
     parser.add_argument('--adam_epsilon', type=float, default=0.999)
     parser.add_argument('--gradient_clip', type=float, default=1.0)
-    parser.add_argument('--warmup_steps', type=int, default=10)
+    parser.add_argument('--warmup_steps', type=int, default=0)
 
     parser.add_argument('--rtol', type=float, default=1e-5)
     parser.add_argument('--atol', type=float, default=1e-5)
