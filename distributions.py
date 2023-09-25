@@ -361,3 +361,17 @@ class IndepGaussian(Distribution):
 
     def sample_model(self, rng_key):
         return self.mean + self.std * jax.random.normal(rng_key, (self.dim,))
+    
+
+class FlatDistribution(Distribution):
+    def __init__(self) -> None:
+        pass
+
+    def logprob(self, x):
+        return 0.
+    
+    def initialize_model(self, rng_key, n_chain):
+        pass
+
+    def sample_model(self, rng_key):
+        pass

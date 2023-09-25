@@ -23,7 +23,7 @@ from tqdm import tqdm
 from blackjax.mcmc.mala import init, build_kernel, MALAState, MALAInfo
 from mcmc_utils import stein_disc, max_mean_disc
 
-from distributions import GaussianMixture, IndepGaussian
+from distributions import GaussianMixture, IndepGaussian, FlatDistribution
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -43,6 +43,7 @@ ref_dists = {
     'stdgauss': lambda dim: IndepGaussian(dim),
     'widegauss': lambda dim: IndepGaussian(dim, var=5.),
     'bimodal': lambda dim: GaussianMixture(dim),
+    'flat': lambda dim: FlatDistribution(),
 }
 
 class VectorFieldNet(nn.Module):
@@ -247,7 +248,26 @@ def create_train_data_gn(logprob_fn, initial_positions,
             lambda _: (prev_state, MALAInfo(acceptance_prob, False, proposed_position, 0.)),
             operand=None)
     
+    def conditional_importance_sampling(rng_key, prev_state, logprob, vector_field_param, **vector_field_kwargs):
+        key_sample, key_hutch_prev, key_hutch, key_choice = jax.random.split(rng_key, 4)
+        pullback_prev, vol_prev = inverse_and_logdet(key_hutch_prev, prev_state.position, vector_field_param, **vector_field_kwargs)
+        prev_weight = jnp.exp(prev_state.logdensity - ref_dist.logprob(pullback_prev) - vol_prev)
+        keys_sample = jax.random.split(key_sample, args.num_importance_samples)
+        ref_samples = jax.vmap(ref_dist.sample_model)(keys_sample)
+        keys_hutch = jax.random.split(key_hutch, args.num_importance_samples)
+        samples, vols = jax.vmap(transform_and_logdet, (0, 0, None))(keys_hutch, ref_samples, vector_field_param, **vector_field_kwargs)
+        samples_logdensity = jax.vmap(logprob)(samples)
+        weights = jax.vmap(lambda logdensity, ref_sample, vol: jnp.exp(logdensity - ref_dist.logprob(ref_sample) - vol))(samples_logdensity, ref_samples, vols)
+        sum_weights = prev_weight + weights.sum()
+        norm_weights = jnp.hstack([prev_weight, weights]) / sum_weights
+        choice = jax.random.choice(key_choice, args.num_importance_samples + 1, p=norm_weights)
+        return jax.lax.cond(choice == 0,
+            lambda _: (prev_state, MALAInfo(norm_weights[0], False, prev_state.position, norm_weights[0])),
+            lambda _: (MALAState(samples[choice - 1], samples_logdensity[choice - 1], prev_state.logdensity_grad), MALAInfo(norm_weights[choice], True, samples[choice - 1], norm_weights[choice])),
+            operand=None)
+    
     anneal_dist = ref_dists[args.anneal_dist](dim)
+    flow_step = conditional_importance_sampling if args.num_importance_samples else indep_metropolis_hastings
 
     def train_data_generator(rng_key, states, count, vector_field_param, beta=1., **vector_field_kwargs):
         logprob = lambda position: beta * logprob_fn(position) + (1. - beta) * anneal_dist.logprob(position)
@@ -256,11 +276,11 @@ def create_train_data_gn(logprob_fn, initial_positions,
             flow_per_mcmc_steps = int(1 / args.mcmc_per_flow_steps)
             return jax.lax.cond(count % (flow_per_mcmc_steps + 1) == 0,
                 lambda _: jax.vmap(lambda k, s: kernel(k, s, logprob, args.step_size))(keys, states),
-                lambda _: jax.vmap(indep_metropolis_hastings, (0, 0, None, None))(keys, states, logprob, vector_field_param, **vector_field_kwargs),
+                lambda _: jax.vmap(flow_step, (0, 0, None, None))(keys, states, logprob, vector_field_param, **vector_field_kwargs),
                 operand=None)
         else:
             return jax.lax.cond(count % (int(args.mcmc_per_flow_steps) + 1) == 0,
-                lambda _: jax.vmap(indep_metropolis_hastings, (0, 0, None, None))(keys, states, logprob, vector_field_param, **vector_field_kwargs),
+                lambda _: jax.vmap(flow_step, (0, 0, None, None))(keys, states, logprob, vector_field_param, **vector_field_kwargs),
                 lambda _: jax.vmap(lambda k, s: kernel(k, s, logprob, args.step_size))(keys, states),
                 operand=None)
 

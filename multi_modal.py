@@ -46,6 +46,7 @@ if __name__ == "__main__":
     parser.add_argument('--ot_cond_flow', dest='ot_cond_flow', action='store_true')
     parser.set_defaults(ot_cond_flow=False)
 
+    parser.add_argument("--num_importance_samples", type=int, default=0)
     parser.add_argument("--mcmc_per_flow_steps", type=float, default=10)
     parser.add_argument('--num_chain', type=int, default=16)
     parser.add_argument("--learning_iter", type=int, default=400)
@@ -53,7 +54,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--anneal_iter", type=int, default=0)
     parser.add_argument('--anneal_temp', type=int, nargs='+', default=[(i + 1) / 10 for i in range(10)])
-    parser.add_argument("--anneal_dist", type=str, default="stdgauss")
+    parser.add_argument("--anneal_dist", type=str, default="flat")
 
     #defaults from PIS
     parser.add_argument('--non_linearity', type=str, default='relu')
