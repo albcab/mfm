@@ -4,6 +4,7 @@ import jax.numpy as jnp
 
 from distributions import GaussianMixture
 from exe_flow_matching import run
+from exe_others import run as run_others
 
 from jax.config import config
 # config.update("jax_debug_nans", True)
@@ -15,8 +16,16 @@ import wandb
 def main(args):
 
     N_PARAM = args.dim
+    if args.do_flowmc:
+        job_type = "flowMC," + "mcmc_per_flow_steps=" + str(args.mcmc_per_flow_steps)
+    elif args.do_pocomc:
+        job_type = "pocomc"
+    elif args.do_dds:
+        job_type = "denoising diffusion sampler"
+    else:
+        job_type = "mcmc_per_flow_steps=" + str(args.mcmc_per_flow_steps) + ",num_importance_samples=" + str(args.num_importance_samples)
     wandb.init(project="gaussian-mixture", config=args, group="dim=" + str(N_PARAM), 
-        job_type="mcmc_per_flow_steps=" + str(args.mcmc_per_flow_steps) + ",learning_iter=" + str(args.learning_iter))
+        job_type=job_type)
 
     print("Setting up Gaussian mixture density...")
     modes = [5., 0.]
@@ -25,7 +34,10 @@ def main(args):
     dist = GaussianMixture(N_PARAM, modes, covs, weights)
 
     print("Running algorithm...")
-    run(dist, args, dist.sample_model)
+    if args.do_flowmc or args.do_pocomc or args.do_dds:
+        run_others(dist, args, dist.sample_model)
+    else:
+        run(dist, args, dist.sample_model)
 
 
 if __name__ == "__main__":
@@ -52,7 +64,7 @@ if __name__ == "__main__":
     parser.add_argument("--learning_iter", type=int, default=400)
     parser.add_argument("--eval_iter", type=int, default=100)
 
-    parser.add_argument("--anneal_iter", type=int, default=0)
+    parser.add_argument("--anneal_iter", type=int, default=200)
     parser.add_argument('--anneal_temp', type=int, nargs='+', default=[(i + 1) / 10 for i in range(10)])
     parser.add_argument("--anneal_dist", type=str, default="flat")
 
@@ -64,11 +76,16 @@ if __name__ == "__main__":
 
     parser.add_argument('--step_size', type=float, default=0.1)
 
-    # parser.add_argument('--cocob', dest='cocob', action='store_true')
-    # parser.add_argument('--no-cocob', dest='cocob', action='store_false')
-    # parser.set_defaults(cocob=True)
+    parser.add_argument('--do_flowmc', dest='do_flowmc', action='store_true')
+    parser.set_defaults(do_flowmc=False)
 
-    parser.add_argument('--learning_rate', type=float, default=1e-4)
+    parser.add_argument('--do_pocomc', dest='do_pocomc', action='store_true')
+    parser.set_defaults(do_pocomc=False)
+
+    parser.add_argument('--do_dds', dest='do_dds', action='store_true')
+    parser.set_defaults(do_dds=False)
+
+    parser.add_argument('--learning_rate', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=0.0)
     parser.add_argument('--adam_beta1', type=float, default=0.9)
     parser.add_argument('--adam_beta2', type=float, default=0.999)
