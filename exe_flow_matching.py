@@ -188,10 +188,10 @@ def create_learning_rate_fn(
     return schedule_fn
 
 
-def create_train_data_gn(logprob_fn, initial_positions, 
+def create_train_data_gn(dist, 
         vector_field_apply, ode_integrator, args):
     kernel = build_kernel()
-    batch_size, dim = initial_positions.shape
+    batch_size, dim = dist.init_params.shape
 
     def transform_and_logdet(key, ref_sample, vector_field_param, **vector_field_kwargs):
 
@@ -285,11 +285,10 @@ def create_train_data_gn(logprob_fn, initial_positions,
             lambda _: (MALAState(samples[choice - 1], samples_logdensity[choice - 1], prev_state.logdensity_grad), MALAInfo(norm_weights[choice], True, samples[choice - 1], norm_weights[choice])),
             operand=None)
     
-    anneal_dist = ref_dists[args.anneal_dist](dim)
     flow_step = conditional_importance_sampling if args.num_importance_samples > 0 else indep_metropolis_hastings if args.num_importance_samples < 0 else random_walk_metropolis_hastings
 
     def train_data_generator(rng_key, states, count, vector_field_param, beta=1., **vector_field_kwargs):
-        logprob = lambda position: beta * logprob_fn(position) + (1. - beta) * anneal_dist.logprob(position)
+        logprob = lambda position: beta * dist.loglik(position) + dist.logprior(position)
         keys = jax.random.split(rng_key, batch_size)
         if args.mcmc_per_flow_steps > 0 and args.mcmc_per_flow_steps < 1:
             flow_per_mcmc_steps = int(1 / args.mcmc_per_flow_steps)
@@ -303,7 +302,7 @@ def create_train_data_gn(logprob_fn, initial_positions,
                 lambda _: jax.vmap(lambda k, s: kernel(k, s, logprob, args.step_size))(keys, states),
                 operand=None)
 
-    init_fn = lambda init_positions, beta=1.: jax.vmap(init, (0, None))(init_positions, lambda position: beta * logprob_fn(position) + (1. - beta) * anneal_dist.logprob(position))
+    init_fn = lambda init_positions, beta=1.: jax.vmap(init, (0, None))(init_positions, lambda position: beta * dist.loglik(position) + dist.logprior(position))
     return train_data_generator, init_fn
 
 
@@ -362,7 +361,7 @@ def run(dist, args, target_gn=None):
         )(jax.random.split(key, n_chain))
         init_fn = lambda positions, *_: jax.vmap(lambda p: MALAState(p, None, None))(positions)
     else:
-        train_data_generator, init_fn = create_train_data_gn(dist.logprob, dist.init_params, 
+        train_data_generator, init_fn = create_train_data_gn(dist,
             model.apply, odeintegrator, args)
         
     ref_dist = ref_dists[args.ref_dist](args.dim)
@@ -414,7 +413,7 @@ def run(dist, args, target_gn=None):
 
     if args.check:
         print("Logpdf of real samples=", jax.vmap(dist.logprob)(real_samples).sum())
-        stein = stein_disc(real_samples, dist.logprob_fn)
+        stein = stein_disc(real_samples, dist.logprob)
         print("Stein U, V disc of real samples=", stein[0], stein[1])
         mmd = max_mean_disc(real_samples, real_samples)
         print("Max mean disc of NF+MCMC samples=", mmd)

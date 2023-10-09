@@ -66,7 +66,6 @@ if __name__ == "__main__":
 
     parser.add_argument("--anneal_iter", type=int, default=200)
     parser.add_argument('--anneal_temp', type=int, nargs='+', default=[(i + 1) / 10 for i in range(10)])
-    parser.add_argument("--anneal_dist", type=str, default="flat")
 
     #defaults from PIS
     parser.add_argument('--non_linearity', type=str, default='relu')

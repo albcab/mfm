@@ -336,6 +336,12 @@ class GaussianMixture(Distribution):
             pdf += w * multivariate_normal.pdf(x, m, c)
         return jnp.log(pdf)
     
+    def loglik(self, x):
+        return self.logprob(x)
+    
+    def logprior(self, x):
+        return 0.
+    
     def initialize_model(self, rng_key, n_chain):
         keys = jax.random.split(rng_key, n_chain)
         self.init_params = jax.vmap(lambda k: jax.random.normal(k, (self.dim,)))(keys)
