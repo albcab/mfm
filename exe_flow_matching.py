@@ -4,6 +4,7 @@ from typing import Callable
 
 import jax
 import jax.numpy as jnp
+from jax.scipy.stats import norm
 
 import flax.linen as nn
 from flax import struct, traverse_util
@@ -248,6 +249,24 @@ def create_train_data_gn(logprob_fn, initial_positions,
             lambda _: (prev_state, MALAInfo(acceptance_prob, False, proposed_position, 0.)),
             operand=None)
     
+    optimal_scale = 2.38 / jnp.sqrt(dim)
+
+    def random_walk_metropolis_hastings(rng_key, prev_state, logprob, vector_field_param, **vector_field_kwargs):
+        key_gen, key_acc, key_hutch1, key_hutch2 = jax.random.split(rng_key, 4)
+        initial_position = prev_state.position
+        initial_pullback, initial_delta_vol = inverse_and_logdet(key_hutch2, initial_position, vector_field_param, **vector_field_kwargs)
+        proposed_pullback = initial_pullback + optimal_scale * jax.random.normal(key_gen, (dim,))
+        proposed_position, proposed_delta_vol = transform_and_logdet(key_hutch1, proposed_pullback, vector_field_param, **vector_field_kwargs)
+        proposed_logdensity, proposed_logdensity_grad = jax.value_and_grad(logprob)(proposed_position)
+        acceptance_prob = jnp.exp(
+            proposed_logdensity - proposed_delta_vol
+            - prev_state.logdensity - initial_delta_vol
+        )
+        return jax.lax.cond(jax.random.uniform(key_acc) <= acceptance_prob,
+            lambda _: (MALAState(proposed_position, proposed_logdensity, proposed_logdensity_grad), MALAInfo(acceptance_prob, True, proposed_position, 0.)),
+            lambda _: (prev_state, MALAInfo(acceptance_prob, False, proposed_position, 0.)),
+            operand=None)
+    
     def conditional_importance_sampling(rng_key, prev_state, logprob, vector_field_param, **vector_field_kwargs):
         key_sample, key_hutch_prev, key_hutch, key_choice = jax.random.split(rng_key, 4)
         pullback_prev, vol_prev = inverse_and_logdet(key_hutch_prev, prev_state.position, vector_field_param, **vector_field_kwargs)
@@ -267,7 +286,7 @@ def create_train_data_gn(logprob_fn, initial_positions,
             operand=None)
     
     anneal_dist = ref_dists[args.anneal_dist](dim)
-    flow_step = conditional_importance_sampling if args.num_importance_samples else indep_metropolis_hastings
+    flow_step = conditional_importance_sampling if args.num_importance_samples > 0 else indep_metropolis_hastings if args.num_importance_samples < 0 else random_walk_metropolis_hastings
 
     def train_data_generator(rng_key, states, count, vector_field_param, beta=1., **vector_field_kwargs):
         logprob = lambda position: beta * logprob_fn(position) + (1. - beta) * anneal_dist.logprob(position)
