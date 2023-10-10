@@ -18,6 +18,8 @@ from ott.geometry import costs, pointcloud
 from ott.problems.linear import linear_problem
 from ott.solvers.linear import sinkhorn
 
+from jaxopt import Bisection
+
 import wandb
 from tqdm import tqdm
 
@@ -315,8 +317,7 @@ def run(dist, args, target_gn=None):
 
     use_real_samples = args.mcmc_per_flow_steps < 0
     learning_iter = args.learning_iter
-    num_temps = len(args.anneal_temp)
-    iter_per_temp = args.anneal_iter // num_temps
+    iter_per_temp = args.anneal_iter // args.num_anneal_temp
     n_iter = args.eval_iter
     n_chain = args.num_chain
     key_target, key_sample, key_init, key_dist, key_fourier, key_gen = jax.random.split(jax.random.PRNGKey(args.seed), 6)
@@ -366,23 +367,44 @@ def run(dist, args, target_gn=None):
         
     ref_dist = ref_dists[args.ref_dist](args.dim)
     sample_reference = lambda key: jax.vmap(ref_dist.sample_model)(jax.random.split(key, n_iter * n_chain))
+
+    def beta_fn(prev_beta, logliks):
+        def ess_zero(beta):
+            logw = logliks * (beta - prev_beta)
+            logw_max = jnp.max(logw)
+            logw_normed = logw - logw_max
+            weights = jnp.exp(logw_normed) / jnp.sum(jnp.exp(logw_normed))
+            return 1.0 / jnp.sum(weights * weights) - args.alpha * n_chain
+        bisec = Bisection(optimality_fun=ess_zero, lower=prev_beta, upper=1., maxiter=30, tol=1e-5, check_bracket=False)
+        beta = bisec.run().params
+        return beta, logliks * (beta - prev_beta)
         
     # train_start = time.time() #pre jit
     train_data_generator = jax.jit(train_data_generator)
     init_fn = jax.jit(init_fn)
     train_step = jax.jit(train_step)
+    beta_fn = jax.jit(beta_fn)
+    mapped_loglik = jax.vmap(dist.loglik)
     train_start = time.time() #post jit
 
-    if args.anneal_iter > 0 and not use_real_samples:
-        beta = args.anneal_temp.pop(0)
+    # if args.anneal_iter > 0 and not use_real_samples:
+    #     beta = args.anneal_temp.pop(0)
+    if not use_real_samples:
+        beta, _ = beta_fn(0., mapped_loglik(dist.init_params))
+        print("Initial beta=", beta)
     else:
         beta = 1.
     train_states = init_fn(dist.init_params, beta)
     for count in tqdm(range(1, learning_iter + 1), desc="Training..."):
         key_sample, key_train_gn, key_train_step = jax.random.split(key_sample, 3)
-        if args.anneal_iter >= count and not use_real_samples:
+        # if args.anneal_iter >= count and not use_real_samples:
+        #     if count % (iter_per_temp + 1) == 0:
+        #         beta = args.anneal_temp.pop(0)
+        #         train_states = init_fn(train_states.position, beta)
+        if beta < 1. and not use_real_samples:
             if count % (iter_per_temp + 1) == 0:
-                beta = args.anneal_temp.pop(0)
+                beta, _ = beta_fn(beta, mapped_loglik(train_states.position))
+                print("New beta=", beta)
                 train_states = init_fn(train_states.position, beta)
         train_states, infos = train_data_generator(key_train_gn, train_states, count, vector_field_param, beta)
         state, train_metric = train_step(state, train_states.position, key_train_step)

@@ -32,6 +32,7 @@ def main(args):
     covs = [.5, .5]
     weights = jnp.array([.7, .3])
     dist = GaussianMixture(N_PARAM, modes, covs, weights)
+    # args.anneal_temp = [i / args.num_anneal_temp for i in range(1, args.num_anneal_temp + 1)]
 
     print("Running algorithm...")
     if args.do_flowmc or args.do_pocomc or args.do_dds:
@@ -64,8 +65,9 @@ if __name__ == "__main__":
     parser.add_argument("--learning_iter", type=int, default=400)
     parser.add_argument("--eval_iter", type=int, default=100)
 
+    parser.add_argument("--alpha", type=float, default=0.95)
     parser.add_argument("--anneal_iter", type=int, default=200)
-    parser.add_argument('--anneal_temp', type=int, nargs='+', default=[(i + 1) / 10 for i in range(10)])
+    parser.add_argument('--num_anneal_temp', type=int, default=10)
 
     #defaults from PIS
     parser.add_argument('--non_linearity', type=str, default='relu')
