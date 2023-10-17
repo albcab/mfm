@@ -22,6 +22,8 @@ def main(args):
         job_type = "pocomc"
     elif args.do_dds:
         job_type = "denoising diffusion sampler"
+    elif args.do_smc:
+        job_type = "Adaptive tempered SMC"
     else:
         job_type = "mcmc_per_flow_steps=" + str(args.mcmc_per_flow_steps) + ",num_importance_samples=" + str(args.num_importance_samples)
     wandb.init(project="gaussian-mixture", config=args, group="dim=" + str(N_PARAM), 
@@ -35,7 +37,7 @@ def main(args):
     # args.anneal_temp = [i / args.num_anneal_temp for i in range(1, args.num_anneal_temp + 1)]
 
     print("Running algorithm...")
-    if args.do_flowmc or args.do_pocomc or args.do_dds:
+    if args.do_flowmc or args.do_pocomc or args.do_dds or args.do_smc:
         run_others(dist, args, dist.sample_model)
     else:
         run(dist, args, dist.sample_model)
@@ -85,6 +87,9 @@ if __name__ == "__main__":
 
     parser.add_argument('--do_dds', dest='do_dds', action='store_true')
     parser.set_defaults(do_dds=False)
+
+    parser.add_argument('--do_smc', dest='do_smc', action='store_true')
+    parser.set_defaults(do_smc=False)
 
     parser.add_argument('--learning_rate', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=0.0)

@@ -36,8 +36,40 @@ def run(dist, args, target_gn=None):
         keys_target = jax.random.split(key_gen, n_iter * n_chain)
         real_samples = jax.vmap(target_gn)(keys_target)
 
+    
+    if args.do_smc:
+        from blackjax.smc import adaptive_tempered, resampling
+        from blackjax.mcmc import mala
 
-    if args.do_flowmc:
+        tempered = adaptive_tempered.adaptive_tempered_smc(
+            dist.logprior,
+            dist.loglik,
+            mala.build_kernel(),
+            mala.init,
+            dict(step_size=args.step_size),
+            resampling.systematic,
+            args.alpha,
+            num_mcmc_steps=args.anneal_iter // args.num_anneal_temp,
+        )
+
+        @jax.jit
+        def one_step(state, key):
+            state, info = tempered.step(key, state)
+            return state, (state, info)
+        
+        keys = jax.random.split(jax.random.PRNGKey(args.seed), learning_iter)
+        init_state = tempered.init(dist.init_params)
+        train_start = time.time()
+        state, _ = jax.lax.scan(one_step, init_state, keys)
+        print("Train time=", time.time() - train_start)
+        print("Final temp=", state.lmbda)
+
+        keys = jax.random.split(keys[0], n_iter)
+        _, (states, infos) = jax.lax.scan(one_step, state, keys)
+        flow_samples = states.particles.reshape((n_chain * n_iter, args.dim)) #not really flow but MCMC
+
+
+    elif args.do_flowmc:
         from flowMC.nfmodel.rqSpline import MaskedCouplingRQSpline
         from flowMC.sampler.MALA import MALA
         from flowMC.sampler.Sampler import Sampler
@@ -108,8 +140,8 @@ def run(dist, args, target_gn=None):
         sampler = pc.Sampler(
             n_chain,
             args.dim,
-            lambda x: np.array(dist.logprob(x)),
-            FlatDistribution().logprob,
+            lambda x: np.array(dist.loglik(x)),
+            lambda x: np.array(dist.logprior(x)),
             vectorize_likelihood=True,
             vectorize_prior=True,
             bounds=None,
@@ -139,7 +171,7 @@ def run(dist, args, target_gn=None):
         lss_table = wandb.Table(lss_cols, lss)
         wandb.log({lss_name: wandb.plot.line(lss_table, *lss_cols, title=lss_name)})
 
-        flow_samples = results['samples']
+        flow_samples = results['samples'] #not really flow but MCMC
 
 
     elif args.do_dds:
