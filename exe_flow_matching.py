@@ -305,7 +305,7 @@ def create_train_data_gn(dist,
                 operand=None)
 
     init_fn = lambda init_positions, beta=1.: jax.vmap(init, (0, None))(init_positions, lambda position: beta * dist.loglik(position) + dist.logprior(position))
-    return train_data_generator, init_fn
+    return train_data_generator, init_fn, transform_and_logdet
 
 
 def run(dist, args, target_gn=None):
@@ -356,14 +356,13 @@ def run(dist, args, target_gn=None):
 
     logger.info(f"===== Starting training ({learning_iter} iterations w/ {args.anneal_iter} annealing) =====")
 
+    train_data_generator, init_fn, transform_and_logdet = create_train_data_gn(dist,
+        model.apply, odeintegrator, args)
     if use_real_samples:
         train_data_generator = lambda key, *_: jax.vmap(
             lambda k: (MALAState(target_gn(k), None, None), MALAInfo(jnp.nan, None, None, None))
         )(jax.random.split(key, n_chain))
         init_fn = lambda positions, *_: jax.vmap(lambda p: MALAState(p, None, None))(positions)
-    else:
-        train_data_generator, init_fn = create_train_data_gn(dist,
-            model.apply, odeintegrator, args)
         
     ref_dist = ref_dists[args.ref_dist](args.dim)
     sample_reference = lambda key: jax.vmap(ref_dist.sample_model)(jax.random.split(key, n_iter * n_chain))
@@ -406,7 +405,7 @@ def run(dist, args, target_gn=None):
                 beta, _ = beta_fn(beta, mapped_loglik(train_states.position))
                 print("New beta=", beta)
                 train_states = init_fn(train_states.position, beta)
-        train_states, infos = train_data_generator(key_train_gn, train_states, count, vector_field_param, beta)
+        train_states, infos = train_data_generator(key_train_gn, train_states, count, state.params, beta)
         state, train_metric = train_step(state, train_states.position, key_train_step)
         train_metric["acceptance avg."] = infos.acceptance_rate.mean()
         train_metric["acceptance std."] = infos.acceptance_rate.std()
@@ -418,19 +417,12 @@ def run(dist, args, target_gn=None):
         wandb.log(train_metric)
 
 
-    flow_odeintegrator = lambda func, x0: odeint(
-        func, x0, 
-        jnp.linspace(0.0, 1.0, 2), 
-        rtol=args.flow_rtol, atol=args.flow_atol, 
-        mxstep=args.flow_mxstep)
-    
-    def flow(u, param):
-        flow = flow_odeintegrator(lambda u, time: model.apply(param, u, time), u)
-        return flow[-1]
-
-
     u = sample_reference(key_gen)
-    flow_samples = jax.vmap(lambda u: flow(u, state.params))(u)
+    key_hutch, key_choice = jax.random.split(key_gen)
+    flow_samples, vols = jax.vmap(lambda u: transform_and_logdet(key_hutch, u, state.params))(u)
+    samples_logdensity = jax.vmap(dist.logprob)(flow_samples)
+    weights = jax.vmap(lambda logdensity, ref_sample, vol: jnp.exp(logdensity - ref_dist.logprob(ref_sample) - vol))(samples_logdensity, u, vols)
+    exact_samples = jax.random.choice(key_choice, flow_samples, (n_iter * n_chain,), p=weights)
 
 
     if args.check:
@@ -445,32 +437,56 @@ def run(dist, args, target_gn=None):
     print("Logpdf of flow samples=", logpdf)
     stein = stein_disc(flow_samples, dist.logprob)
     print("Stein U, V disc of flow samples=", stein[0], stein[1])
-    data = [args.mcmc_per_flow_steps, args.learning_iter, logpdf, stein[0], stein[1]]
-    columns = ["mcmc/flow", "learn iter", "logpdf", "KSD U-stat", "KSD V-stat"]
+    logpdf_ = jax.vmap(dist.logprob)(exact_samples).sum()
+    print("Logpdf of exact samples=", logpdf_)
+    stein_ = stein_disc(exact_samples, dist.logprob)
+    print("Stein U, V disc of exact samples=", stein_[0], stein_[1])
+    data = [args.mcmc_per_flow_steps, args.learning_iter, train_time, logpdf, logpdf_, stein[0], stein_[0], stein[1], stein_[1]]
+    columns = ["mcmc/flow", "learn iter", "train time", "logpdf", "logpdf*", "KSD U-stat", "KSD U-stat*", "KSD V-stat", "KSD V-stat*"]
 
     if target_gn is not None:
         mmd = max_mean_disc(real_samples, flow_samples)
         print("Max mean disc of flow samples=", mmd)
         data.append(mmd)
         columns.append("MMD")
+        mmd_ = max_mean_disc(real_samples, exact_samples)
+        print("Max mean disc of exact samples=", mmd_)
+        data.append(mmd_)
+        columns.append("MMD*")
         print()
         
-        for i in range(real_samples.shape[1] - 1):
-            fig, ax = plt.subplots(1, 2, figsize=(11, 4), sharex=True, sharey=True)
-            ax[1].set_title(r"$\hat{\phi}$")
-            ax[1].set_xlabel(r"$x_1$")
-            ax[1].set_ylabel(r"$x_{-1}$")
-            sns.histplot(x=flow_samples[:, 0], y=flow_samples[:, i+1], ax=ax[1], bins=50)
-            ax[0].set_title(r"$\pi$")
-            ax[0].set_xlabel(r"$x_1$")
-            ax[0].set_ylabel(r"$x_{-1}$")
-            sns.histplot(x=real_samples[:, 0], y=real_samples[:, i+1], ax=ax[0], bins=50)
-            data.append(wandb.Image(fig))
-            columns.append("plot (x0,x" + str(i+1) + ")")
-            plt.close()
-            if i > 8:
-                break #only the first 10 dimensions
+    for i in range(args.dim - 1):
+        fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+        ax[1].set_title(r"$\hat{\phi}$")
+        ax[1].set_xlabel(r"$x_1$")
+        ax[1].set_ylabel(r"$x_{-1}$")
+        sns.histplot(x=flow_samples[:, 0], y=flow_samples[:, i+1], ax=ax[1], bins=50)
+        ax[0].set_title(r"$\pi$")
+        ax[0].set_xlabel(r"$x_1$")
+        ax[0].set_ylabel(r"$x_{-1}$")
+        sns.histplot(x=exact_samples[:, 0], y=exact_samples[:, i+1], ax=ax[0], bins=50)
+        plt.setp(ax, xlim=args.xlim, ylim=args.ylim)
+        plot_contours(dist.logprob, ax, args)
+        data.append(wandb.Image(fig))
+        columns.append("plot (x0,x" + str(i+1) + ")")
+        plt.close()
+        if i > 8:
+            break #only the first 10 dimensions
 
     wandb.log({"summary": wandb.Table(columns, [data])})
     wandb.finish()
     return None
+
+import itertools
+def plot_contours(log_prob_func: Callable, ax: plt.Axes, args):
+    """Plot contours of a log_prob_func that is defined on 2D"""
+    x_points_dim1 = jnp.linspace(args.xlim[0], args.xlim[1], args.grid_width)
+    x_points_dim2 = jnp.linspace(args.ylim[0], args.ylim[1], args.grid_width)
+    x_points = jnp.array(list(itertools.product(x_points_dim1, x_points_dim2)))
+    log_p_x = jax.vmap(log_prob_func)(x_points)
+    log_p_x = jnp.maximum(log_p_x, -1000)
+    log_p_x = log_p_x.reshape((args.grid_width, args.grid_width))
+    x_points_dim1 = x_points[:, 0].reshape((args.grid_width, args.grid_width))
+    x_points_dim2 = x_points[:, 1].reshape((args.grid_width, args.grid_width))
+    ax[0].contour(x_points_dim1, x_points_dim2, log_p_x, levels=args.levels)
+    ax[1].contour(x_points_dim1, x_points_dim2, log_p_x, levels=args.levels)

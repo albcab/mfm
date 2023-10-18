@@ -2,6 +2,7 @@ import logging
 import time
 
 import jax
+import jax.numpy as jnp
 
 import numpy as np
 
@@ -9,7 +10,7 @@ import wandb
 
 from mcmc_utils import stein_disc, max_mean_disc
 
-from distributions import FlatDistribution
+from exe_flow_matching import plot_contours
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -61,12 +62,13 @@ def run(dist, args, target_gn=None):
         init_state = tempered.init(dist.init_params)
         train_start = time.time()
         state, _ = jax.lax.scan(one_step, init_state, keys)
-        print("Train time=", time.time() - train_start)
+        train_time = time.time() - train_start
         print("Final temp=", state.lmbda)
 
         keys = jax.random.split(keys[0], n_iter)
         _, (states, infos) = jax.lax.scan(one_step, state, keys)
         flow_samples = states.particles.reshape((n_chain * n_iter, args.dim)) #not really flow but MCMC
+        exact_samples = states.particles.reshape((n_chain * n_iter, args.dim)) #not really flow but MCMC
 
 
     elif args.do_flowmc:
@@ -85,7 +87,7 @@ def run(dist, args, target_gn=None):
         nf_sampler = Sampler(
             args.dim,
             rng_key_set,
-            jax.numpy.zeros(args.dim),
+            jnp.zeros(args.dim),
             MALA_Sampler,
             model,
             n_loop_training=learning_iter // mcmc_per_flow_steps,
@@ -102,7 +104,7 @@ def run(dist, args, target_gn=None):
 
         train_start = time.time()
         nf_sampler.sample(dist.init_params, None)
-        print("Train time=", time.time() - train_start)
+        train_time = time.time() - train_start
 
         out_train = nf_sampler.get_sampler_state(training=True)
         global_accs = np.array(out_train['global_accs'])
@@ -129,7 +131,20 @@ def run(dist, args, target_gn=None):
         lss_table = wandb.Table(lss_cols, lss)
         wandb.log({lss_name: wandb.plot.line(lss_table, *lss_cols, title=lss_name)})
 
+        # u = jax.vmap(jax.random.normal)(jax.random.split(key_gen, n_iter * n_chain))
+        # key_hutch, key_choice = jax.random.split(key_gen)
+        # flow_samples, vols = jax.vmap(lambda u: nf_sampler.nf_model.forward(u))(u)
+        # samples_logdensity = jax.vmap(dist.logprob)(flow_samples)
+        # weights = jax.vmap(lambda logdensity, ref_sample, vol: jnp.exp(logdensity + .5 * jnp.dot(ref_sample, ref_sample) - vol))(samples_logdensity, u, vols)
+        # exact_samples = jax.random.choice(key_choice, flow_samples, (n_iter * n_chain,), p=weights)
+
         flow_samples = nf_sampler.sample_flow(n_iter * n_chain)
+        log_prob_flow = nf_sampler.evalulate_flow(flow_samples)
+        samples_logdensity = jax.vmap(dist.logprob)(flow_samples)
+        weights = jax.vmap(lambda logdensity, logp_flow: jnp.exp(logdensity - logp_flow))(samples_logdensity, log_prob_flow)
+        key_hutch, key_choice = jax.random.split(key_gen)
+        exact_samples = jax.random.choice(key_choice, flow_samples, (n_iter * n_chain,), p=weights)
+
 
     elif args.do_pocomc:
         import pocomc as pc
@@ -150,7 +165,7 @@ def run(dist, args, target_gn=None):
         )
         train_start = time.time()
         sampler.run(np.array(dist.init_params))
-        print("Train time=", time.time() - train_start)
+        train_time = time.time() - train_start
 
         sampler.add_samples(n_iter * n_chain)
         results = sampler.results
@@ -172,6 +187,7 @@ def run(dist, args, target_gn=None):
         wandb.log({lss_name: wandb.plot.line(lss_table, *lss_cols, title=lss_name)})
 
         flow_samples = results['samples'] #not really flow but MCMC
+        exact_samples = results['samples'] #not really flow but MCMC
 
 
     elif args.do_dds:
@@ -214,11 +230,21 @@ def run(dist, args, target_gn=None):
         config.model.elbo_batch_size = n_chain #2000
         config.trainer.timer = False
         config.eval.seeds = 0 #30
+        train_start = time.time()
         out_dict = train_dds(config)
+        train_time = time.time() - train_start
 
         print(out_dict[-1]["aug"].shape)
         # flow_samples = out_dict[-1]["aug_ode"][:, -1,:args.dim]
-        flow_samples = out_dict[-1]["aug"][:, -1,:args.dim]
+        flow_samples = out_dict[-1]["aug"][:, -1, :args.dim]
+        energy_cost_dt = out_dict[-1]["aug"][:, -1, -1]
+        stl = out_dict[-1]["aug"][:, -1, args.dim]
+        terminal_cost = config.model.terminal_cost(flow_samples, 
+            config.trainer.lnpi, config.model.sigma, config.model.tfinal, 
+            "brown" in str(config.model.reference_process_dict[config.model.reference_process_key]).lower())
+        weights = jnp.exp(-energy_cost_dt - terminal_cost - stl)
+        key_hutch, key_choice = jax.random.split(key_gen)
+        exact_samples = jax.random.choice(key_choice, flow_samples, (out_dict[-1]["aug"].shape[0],), p=weights)
 
     
     if args.check:
@@ -233,31 +259,41 @@ def run(dist, args, target_gn=None):
     print("Logpdf of flow samples=", logpdf)
     stein = stein_disc(flow_samples, dist.logprob)
     print("Stein U, V disc of flow samples=", stein[0], stein[1])
-    data = [args.mcmc_per_flow_steps, args.learning_iter, logpdf, stein[0], stein[1]]
-    columns = ["mcmc/flow", "learn iter", "logpdf", "KSD U-stat", "KSD V-stat"]
+    logpdf_ = jax.vmap(dist.logprob)(exact_samples).sum()
+    print("Logpdf of exact samples=", logpdf_)
+    stein_ = stein_disc(exact_samples, dist.logprob)
+    print("Stein U, V disc of exact samples=", stein_[0], stein_[1])
+    data = [args.mcmc_per_flow_steps, args.learning_iter, train_time, logpdf, logpdf_, stein[0], stein_[0], stein[1], stein_[1]]
+    columns = ["mcmc/flow", "learn iter", "train time", "logpdf", "logpdf*", "KSD U-stat", "KSD U-stat*", "KSD V-stat", "KSD V-stat*"]
 
     if target_gn is not None:
         mmd = max_mean_disc(real_samples, flow_samples)
         print("Max mean disc of flow samples=", mmd)
         data.append(mmd)
         columns.append("MMD")
+        mmd_ = max_mean_disc(real_samples, exact_samples)
+        print("Max mean disc of exact samples=", mmd_)
+        data.append(mmd_)
+        columns.append("MMD*")
         print()
         
-        for i in range(real_samples.shape[1] - 1):
-            fig, ax = plt.subplots(1, 2, figsize=(11, 4), sharex=True, sharey=True)
-            ax[1].set_title(r"$\hat{\phi}$")
-            ax[1].set_xlabel(r"$x_1$")
-            ax[1].set_ylabel(r"$x_{-1}$")
-            sns.histplot(x=flow_samples[:, 0], y=flow_samples[:, i+1], ax=ax[1], bins=50)
-            ax[0].set_title(r"$\pi$")
-            ax[0].set_xlabel(r"$x_1$")
-            ax[0].set_ylabel(r"$x_{-1}$")
-            sns.histplot(x=real_samples[:, 0], y=real_samples[:, i+1], ax=ax[0], bins=50)
-            data.append(wandb.Image(fig))
-            columns.append("plot (x0,x" + str(i+1) + ")")
-            plt.close()
-            if i > 8:
-                break #only the first 10 dimensions
+    for i in range(args.dim - 1):
+        fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+        ax[1].set_title(r"$\hat{\phi}$")
+        ax[1].set_xlabel(r"$x_1$")
+        ax[1].set_ylabel(r"$x_{-1}$")
+        sns.histplot(x=flow_samples[:, 0], y=flow_samples[:, i+1], ax=ax[1], bins=50)
+        ax[0].set_title(r"$\pi$")
+        ax[0].set_xlabel(r"$x_1$")
+        ax[0].set_ylabel(r"$x_{-1}$")
+        sns.histplot(x=exact_samples[:, 0], y=exact_samples[:, i+1], ax=ax[0], bins=50)
+        plt.setp(ax, xlim=args.xlim, ylim=args.ylim)
+        plot_contours(dist.logprob, ax, args)
+        data.append(wandb.Image(fig))
+        columns.append("plot (x0,x" + str(i+1) + ")")
+        plt.close()
+        if i > 8:
+            break #only the first 10 dimensions
 
     wandb.log({"summary": wandb.Table(columns, [data])})
     wandb.finish()

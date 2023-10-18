@@ -106,6 +106,11 @@ if __name__ == "__main__":
     parser.add_argument('--flow_atol', type=float, default=1e-5)
     parser.add_argument('--flow_mxstep', type=float, default=1000)
 
+    parser.add_argument('--xlim', type=float, nargs=2, default=[-2, 8])
+    parser.add_argument('--ylim', type=float, nargs=2, default=[-2, 8])
+    parser.add_argument('--grid_width', type=int, default=200)
+    parser.add_argument('--levels', type=int, default=50)
+
     parser.add_argument('--check', dest='check', action='store_true')
     parser.set_defaults(check=False)
     args = parser.parse_args()
