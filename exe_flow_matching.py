@@ -465,8 +465,9 @@ def run(dist, args, target_gn=None):
         ax[0].set_xlabel(r"$x_1$")
         ax[0].set_ylabel(r"$x_{-1}$")
         sns.histplot(x=exact_samples[:, 0], y=exact_samples[:, i+1], ax=ax[0], bins=50)
-        plt.setp(ax, xlim=args.xlim, ylim=args.ylim)
-        plot_contours(dist.logprob, ax, args)
+        plt.setp(ax, xlim=args.lim, ylim=args.lim)
+        if args.dim == 2:
+            plot_contours(dist.logprob, ax, args)
         data.append(wandb.Image(fig))
         columns.append("plot (x0,x" + str(i+1) + ")")
         plt.close()
@@ -480,8 +481,8 @@ def run(dist, args, target_gn=None):
 import itertools
 def plot_contours(log_prob_func: Callable, ax: plt.Axes, args):
     """Plot contours of a log_prob_func that is defined on 2D"""
-    x_points_dim1 = jnp.linspace(args.xlim[0], args.xlim[1], args.grid_width)
-    x_points_dim2 = jnp.linspace(args.ylim[0], args.ylim[1], args.grid_width)
+    x_points_dim1 = jnp.linspace(args.lim[0], args.lim[1], args.grid_width)
+    x_points_dim2 = x_points_dim1
     x_points = jnp.array(list(itertools.product(x_points_dim1, x_points_dim2)))
     log_p_x = jax.vmap(log_prob_func)(x_points)
     log_p_x = jnp.maximum(log_p_x, -1000)

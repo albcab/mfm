@@ -317,24 +317,20 @@ class MultivarNormal(BiDistribution):
         )
     
 class GaussianMixture(Distribution):
-    def __init__(self, 
-        dim=2,
-        modes=[2., -2.],
-        covs=[.5, .5],
-        weights=.5 * jnp.ones(2)
+    def __init__(self,
+        modes=jnp.array([5. * jnp.ones(2), 0. * jnp.ones(2)]),
+        covs=jnp.array([.5 * jnp.eye(2), .5 * jnp.eye(2)]),
+        weights=jnp.array([.7, .3]),
     ) -> None:
-        self.dim = dim
-        self.modes = [mode * jnp.ones(dim) for mode in modes]
-        self.modes_array = jnp.concatenate([jnp.expand_dims(mode, 0) for mode in self.modes])
-        self.covs = [cov * jnp.eye(dim) for cov in covs] #assumes covs are floats
-        self.chol_covs = jnp.concatenate([jnp.expand_dims(jnp.linalg.cholesky(cov), 0) for cov in self.covs])
+        self.dim = modes[0].shape[0]
+        self.modes = modes
+        self.covs = covs
+        self.chol_covs = jax.vmap(jnp.sqrt)(covs) #jax.vmap(jnp.linalg.cholesky)(covs)
         self.weights = weights
     
     def logprob(self, x):
-        pdf = 0.
-        for m, c, w in zip(self.modes, self.covs, self.weights):
-            pdf += w * multivariate_normal.pdf(x, m, c)
-        return jnp.log(pdf)
+        pdfs = jax.vmap(lambda m, c, w: w * norm.pdf(x, m, c))(self.modes, self.chol_covs, self.weights)
+        return jnp.log(pdfs.sum())
     
     def loglik(self, x):
         return self.logprob(x)
@@ -349,7 +345,7 @@ class GaussianMixture(Distribution):
     def sample_model(self, rng_key):
         key_choice, key_dist = jax.random.split(rng_key)
         choice = jax.random.choice(key_choice, len(self.modes), p=self.weights)
-        return self.modes_array.at[choice].get() + self.chol_covs.at[choice].get() @ jax.random.normal(key_dist, (self.dim,))
+        return self.modes.at[choice].get() + self.chol_covs.at[choice].get() * jax.random.normal(key_dist, (self.dim,))
     
 
 class IndepGaussian(Distribution):

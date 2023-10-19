@@ -159,8 +159,9 @@ def run(dist, args, target_gn=None):
             lambda x: np.array(dist.logprior(x)),
             vectorize_likelihood=True,
             vectorize_prior=True,
+            infer_vectorization=False,
             bounds=None,
-            flow_config={'n_blocks': n_layers, 'hidden_size': args.hidden_xt[0], 'n_hidden': n_layers // 3, 'batch_norm': False, 'activation': args.non_linearity, 'input_order': 'sequential', 'flow_type': 'maf'},
+            flow_config={'n_blocks': n_layers, 'hidden_size': args.hidden_xt[0], 'n_hidden': n_layers // 2, 'batch_norm': False, 'activation': args.non_linearity, 'input_order': 'sequential', 'flow_type': 'maf'},
             train_config={'validation_split': 0.2, 'epochs': learning_iter, 'batch_size': n_chain, 'patience': 30, 'monitor': 'val_loss', 'shuffle': True, 'lr': [args.learning_rate * (.1) ** i for i in range(4)], 'weight_decay': args.weight_decay, 'clip_grad_norm': args.gradient_clip, 'laplace_prior_scale': 0.2, 'gaussian_prior_scale': None, 'device': 'cpu', 'verbose': 0},
         )
         train_start = time.time()
@@ -234,17 +235,18 @@ def run(dist, args, target_gn=None):
         out_dict = train_dds(config)
         train_time = time.time() - train_start
 
-        print(out_dict[-1]["aug"].shape)
+        name = "aug"
+        print(out_dict[-1][name].shape)
         # flow_samples = out_dict[-1]["aug_ode"][:, -1,:args.dim]
-        flow_samples = out_dict[-1]["aug"][:, -1, :args.dim]
-        energy_cost_dt = out_dict[-1]["aug"][:, -1, -1]
-        stl = out_dict[-1]["aug"][:, -1, args.dim]
+        flow_samples = out_dict[-1][name][:, -1, :args.dim]
+        energy_cost_dt = out_dict[-1][name][:, -1, -1]
+        stl = out_dict[-1][name][:, -1, args.dim]
         terminal_cost = config.model.terminal_cost(flow_samples, 
             config.trainer.lnpi, config.model.sigma, config.model.tfinal, 
             "brown" in str(config.model.reference_process_dict[config.model.reference_process_key]).lower())
         weights = jnp.exp(-energy_cost_dt - terminal_cost - stl)
         key_hutch, key_choice = jax.random.split(key_gen)
-        exact_samples = jax.random.choice(key_choice, flow_samples, (out_dict[-1]["aug"].shape[0],), p=weights)
+        exact_samples = jax.random.choice(key_choice, flow_samples, (out_dict[-1][name].shape[0],), p=weights)
 
     
     if args.check:
@@ -287,8 +289,9 @@ def run(dist, args, target_gn=None):
         ax[0].set_xlabel(r"$x_1$")
         ax[0].set_ylabel(r"$x_{-1}$")
         sns.histplot(x=exact_samples[:, 0], y=exact_samples[:, i+1], ax=ax[0], bins=50)
-        plt.setp(ax, xlim=args.xlim, ylim=args.ylim)
-        plot_contours(dist.logprob, ax, args)
+        plt.setp(ax, xlim=args.lim, ylim=args.lim)
+        if args.dim == 2:
+            plot_contours(dist.logprob, ax, args)
         data.append(wandb.Image(fig))
         columns.append("plot (x0,x" + str(i+1) + ")")
         plt.close()

@@ -1,5 +1,6 @@
 import argparse
 
+import jax
 import jax.numpy as jnp
 
 from distributions import GaussianMixture
@@ -30,10 +31,15 @@ def main(args):
         job_type=job_type)
 
     print("Setting up Gaussian mixture density...")
-    modes = [5., 0.]
-    covs = [.5, .5]
-    weights = jnp.array([.7, .3])
-    dist = GaussianMixture(N_PARAM, modes, covs, weights)
+    key_mode, key_cov, key_weight = jax.random.split(jax.random.PRNGKey(args.seed), 3)
+    modes = jax.random.uniform(key_mode, (args.num_modes, args.dim), minval=args.lim[0] * .8, maxval=args.lim[1] * .8)
+    print("Modes=", modes)
+    covs = jnp.exp(.5 * jax.random.normal(key_cov, (args.num_modes, args.dim)))
+    print("Covs=", covs)
+    # covs = jnp.array([cov * jnp.eye(args.dim) for cov in covs])
+    weights = jax.random.dirichlet(key_weight, 4. * jnp.ones(args.num_modes))
+    print("Weights=", weights)
+    dist = GaussianMixture(modes, covs, weights)
     # args.anneal_temp = [i / args.num_anneal_temp for i in range(1, args.num_anneal_temp + 1)]
 
     print("Running algorithm...")
@@ -48,6 +54,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     
     parser.add_argument('--dim', type=int, default=2)
+    parser.add_argument('--num_modes', type=int, default=16)
 
     parser.add_argument("--sigma", type=float, default=1e-4)
     parser.add_argument("--fourier_dim", type=int, default=64)
@@ -65,7 +72,7 @@ if __name__ == "__main__":
     parser.add_argument("--mcmc_per_flow_steps", type=float, default=10)
     parser.add_argument('--num_chain', type=int, default=16)
     parser.add_argument("--learning_iter", type=int, default=400)
-    parser.add_argument("--eval_iter", type=int, default=100)
+    parser.add_argument("--eval_iter", type=int, default=400)
 
     parser.add_argument("--alpha", type=float, default=0.95)
     parser.add_argument("--anneal_iter", type=int, default=200)
@@ -77,7 +84,7 @@ if __name__ == "__main__":
     parser.add_argument('--hidden_t', type=int, nargs='+', default=[64, 64])
     parser.add_argument('--hidden_xt', type=int, nargs='+', default=[64, 64])
 
-    parser.add_argument('--step_size', type=float, default=0.1)
+    parser.add_argument('--step_size', type=float, default=0.4)
 
     parser.add_argument('--do_flowmc', dest='do_flowmc', action='store_true')
     parser.set_defaults(do_flowmc=False)
@@ -106,9 +113,8 @@ if __name__ == "__main__":
     parser.add_argument('--flow_atol', type=float, default=1e-5)
     parser.add_argument('--flow_mxstep', type=float, default=1000)
 
-    parser.add_argument('--xlim', type=float, nargs=2, default=[-2, 8])
-    parser.add_argument('--ylim', type=float, nargs=2, default=[-2, 8])
-    parser.add_argument('--grid_width', type=int, default=200)
+    parser.add_argument('--lim', type=float, nargs=2, default=[-16, 16])
+    parser.add_argument('--grid_width', type=int, default=400)
     parser.add_argument('--levels', type=int, default=50)
 
     parser.add_argument('--check', dest='check', action='store_true')
