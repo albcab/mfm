@@ -109,21 +109,38 @@ class HorseshoeLogisticReg(Distribution):
         self.init_params = {
             'beta': jax.random.normal(kb, (n_chain, self.X.shape[1])),
             'lamda': jax.random.normal(kl, (n_chain, self.X.shape[1])),
-            'tau': jax.random.normal(kt, (n_chain,)),
+            'tau': jax.random.normal(kt, (n_chain, 1)),
         }
+        self.init_params = jnp.concatenate([
+            self.init_params['beta'],
+            self.init_params['lamda'],
+            self.init_params['tau'],
+        ], axis=1)
 
-    def logprob(self, beta, lamda, tau): #non-centered
+    def logprior(self, x): #non-centered
+        beta = x.at[:self.X.shape[1]].get()
+        lamda = x.at[self.X.shape[1]:(2*self.X.shape[1])].get()
+        tau = x.at[-1].get()
         #priors
-        lprob = jnp.sum(
+        return jnp.sum(
             norm.logpdf(beta, loc=0., scale=1.) +
             gamma.logpdf(jnp.exp(lamda), a=.5, loc=0., scale=2.) + lamda
         ) + gamma.logpdf(jnp.exp(tau), a=.5, loc=0., scale=2.) + tau
+    
+    def loglik(self, x):
+        beta = x.at[:self.X.shape[1]].get()
+        lamda = x.at[self.X.shape[1]:(2*self.X.shape[1])].get()
+        tau = x.at[-1].get()
         #likelihood
         logit = jnp.sum(self.X * (jnp.exp(tau) * beta * jnp.exp(lamda)), axis=1)
         p = jnp.clip(expit(logit), a_min=1e-6, a_max=1-1e-6)
         # p = jsp.special.expit(logit)
-        lprob += jnp.sum(bernoulli.logpmf(self.y, p))
-        return lprob
+        return jnp.sum(bernoulli.logpmf(self.y, p))
+    
+    def logprob(self, x):
+        prior = self.logprior(x)
+        lik = self.loglik(x)
+        return lik + prior
 
 
 class ProbitReg(Distribution):
@@ -330,6 +347,7 @@ class GaussianMixture(Distribution):
     
     def logprob(self, x):
         pdfs = jax.vmap(lambda m, c, w: w * norm.pdf(x, m, c))(self.modes, self.chol_covs, self.weights)
+        # pdfs = jax.vmap(lambda m, c, w: w * multivariate_normal.pdf(x, m, c))(self.modes, self.covs, self.weights)
         return jnp.log(pdfs.sum())
     
     def loglik(self, x):
@@ -346,6 +364,7 @@ class GaussianMixture(Distribution):
         key_choice, key_dist = jax.random.split(rng_key)
         choice = jax.random.choice(key_choice, len(self.modes), p=self.weights)
         return self.modes.at[choice].get() + self.chol_covs.at[choice].get() * jax.random.normal(key_dist, (self.dim,))
+        # return self.modes.at[choice].get() + self.chol_covs.at[choice].get() @ jax.random.normal(key_dist, (self.dim,))
     
 
 class IndepGaussian(Distribution):

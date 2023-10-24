@@ -1,9 +1,12 @@
 import argparse
 
+import pandas as pd
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 
-from distributions import GaussianMixture
+from distributions import GaussianMixture, HorseshoeLogisticReg
 from exe_flow_matching import run
 from exe_others import run as run_others
 
@@ -27,20 +30,39 @@ def main(args):
         job_type = "Adaptive tempered SMC"
     else:
         job_type = "mcmc_per_flow_steps=" + str(args.mcmc_per_flow_steps) + ",num_importance_samples=" + str(args.num_importance_samples)
-    wandb.init(project="gaussian-mixture", config=args, group="dim=" + str(N_PARAM), 
+    wandb.init(project=args.example, config=args, group="dim=" + str(N_PARAM), 
         job_type=job_type)
 
-    print("Setting up Gaussian mixture density...")
-    key_mode, key_cov, key_weight = jax.random.split(jax.random.PRNGKey(args.seed), 3)
-    modes = jax.random.uniform(key_mode, (args.num_modes, args.dim), minval=args.lim[0] * .8, maxval=args.lim[1] * .8)
-    print("Modes=", modes)
-    covs = jnp.exp(.5 * jax.random.normal(key_cov, (args.num_modes, args.dim)))
-    print("Covs=", covs)
-    # covs = jnp.array([cov * jnp.eye(args.dim) for cov in covs])
-    weights = jax.random.dirichlet(key_weight, 4. * jnp.ones(args.num_modes))
-    print("Weights=", weights)
-    dist = GaussianMixture(modes, covs, weights)
-    # args.anneal_temp = [i / args.num_anneal_temp for i in range(1, args.num_anneal_temp + 1)]
+    if args.example == "gaussian-mixture":
+        print("Setting up Gaussian mixture density...")
+        key_mode, key_cov, key_weight = jax.random.split(jax.random.PRNGKey(args.seed), 3)
+        modes = jax.random.uniform(key_mode, (args.num_modes, args.dim), minval=args.lim[0] * .8, maxval=args.lim[1] * .8)
+        print("Modes=", modes)
+        covs = jnp.exp(.5 * jax.random.normal(key_cov, (args.num_modes, args.dim)))
+        print("Covs=", covs)
+        # covs = jnp.array([cov * jnp.eye(args.dim) for cov in covs])
+        weights = jax.random.dirichlet(key_weight, 4. * jnp.ones(args.num_modes))
+        print("Weights=", weights)
+        dist = GaussianMixture(modes, covs, weights)
+        # args.anneal_temp = [i / args.num_anneal_temp for i in range(1, args.num_anneal_temp + 1)]
+    
+    elif args.example == "german-credit":
+        print("Loading German credit data...")
+        data = pd.read_table('german.data-numeric', header=None, delim_whitespace=True)
+        ### Pre processing data as in NeuTra paper
+        y = -1 * (data.iloc[:, -1].values - 2)
+        X = data.iloc[:, :-1].apply(lambda x: -1 + (x - x.min()) * 2 / (x.max() - x.min()), axis=0).values
+        # X = data.iloc[:, :-1].apply(lambda x: (x - x.mean()) / x.std(), axis=0).values
+        X = np.concatenate([np.ones((1000, 1)), X], axis=1)
+        N_OBS, N_REG = X.shape
+
+        args.dim = N_REG * 2 + 1
+        print("Target dim=", args.dim)
+        args.lim = [-6, 6]
+        print("\n\nSetting up German credit logistic horseshoe model...")
+        dist = HorseshoeLogisticReg(X, y)
+        dist.sample_model = None
+
 
     print("Running algorithm...")
     if args.do_flowmc or args.do_pocomc or args.do_dds or args.do_smc:
@@ -55,6 +77,7 @@ if __name__ == "__main__":
     
     parser.add_argument('--dim', type=int, default=2)
     parser.add_argument('--num_modes', type=int, default=16)
+    parser.add_argument("--example", type=str, default="german-credit")
 
     parser.add_argument("--sigma", type=float, default=1e-4)
     parser.add_argument("--fourier_dim", type=int, default=64)
@@ -108,10 +131,10 @@ if __name__ == "__main__":
 
     parser.add_argument('--rtol', type=float, default=1e-5)
     parser.add_argument('--atol', type=float, default=1e-5)
-    parser.add_argument('--mxstep', type=float, default=1000)
+    parser.add_argument('--mxstep', type=float, default=100)
     parser.add_argument('--flow_rtol', type=float, default=1e-5)
     parser.add_argument('--flow_atol', type=float, default=1e-5)
-    parser.add_argument('--flow_mxstep', type=float, default=1000)
+    parser.add_argument('--flow_mxstep', type=float, default=100)
 
     parser.add_argument('--lim', type=float, nargs=2, default=[-16, 16])
     parser.add_argument('--grid_width', type=int, default=400)
