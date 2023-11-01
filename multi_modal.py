@@ -6,7 +6,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from distributions import GaussianMixture, HorseshoeLogisticReg
+from distributions import GaussianMixture, HorseshoeLogisticReg, PhiFour
 from exe_flow_matching import run
 from exe_others import run as run_others
 
@@ -63,6 +63,14 @@ def main(args):
         dist = HorseshoeLogisticReg(X, y)
         dist.sample_model = None
 
+    elif args.example == "phi-four":
+        print("Setting up Phi four example density...")
+        dist = PhiFour(args.dim)
+        args.lim = [-1, 1]
+        dist.sample_model = None
+        # args.ref_dist = "phifour"
+        args.cond_flow = True
+
 
     print("Running algorithm...")
     if args.do_flowmc or args.do_pocomc or args.do_dds or args.do_smc:
@@ -75,12 +83,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
     
-    parser.add_argument('--dim', type=int, default=2)
+    parser.add_argument('--dim', type=int, default=64) #2
     parser.add_argument('--num_modes', type=int, default=16)
-    parser.add_argument("--example", type=str, default="german-credit")
+    parser.add_argument("--example", type=str, default="phi-four") #gaussian-mixture
 
     parser.add_argument("--sigma", type=float, default=1e-4)
-    parser.add_argument("--fourier_dim", type=int, default=64)
+    parser.add_argument("--fourier_dim", type=int, default=128) #64
     parser.add_argument("--fourier_std", type=float, default=1.0)
     parser.add_argument('--hutchs', dest='hutchs', action='store_true')
     parser.set_defaults(hutchs=False)
@@ -95,7 +103,7 @@ if __name__ == "__main__":
     parser.add_argument("--mcmc_per_flow_steps", type=float, default=10)
     parser.add_argument('--num_chain', type=int, default=16)
     parser.add_argument("--learning_iter", type=int, default=400)
-    parser.add_argument("--eval_iter", type=int, default=400)
+    parser.add_argument("--eval_iter", type=int, default=100) #400
 
     parser.add_argument("--alpha", type=float, default=0.95)
     parser.add_argument("--anneal_iter", type=int, default=200)
@@ -103,11 +111,11 @@ if __name__ == "__main__":
 
     #defaults from PIS
     parser.add_argument('--non_linearity', type=str, default='relu')
-    parser.add_argument('--hidden_x', type=int, nargs='+', default=[64, 64])
-    parser.add_argument('--hidden_t', type=int, nargs='+', default=[64, 64])
-    parser.add_argument('--hidden_xt', type=int, nargs='+', default=[64, 64])
+    parser.add_argument('--hidden_x', type=int, nargs='+', default=[128, 128]) #[64, 64]
+    parser.add_argument('--hidden_t', type=int, nargs='+', default=[128, 128]) #[64, 64]
+    parser.add_argument('--hidden_xt', type=int, nargs='+', default=[128, 128]) #[64, 64]
 
-    parser.add_argument('--step_size', type=float, default=0.4)
+    parser.add_argument('--step_size', type=float, default=0.001) #.4
 
     parser.add_argument('--do_flowmc', dest='do_flowmc', action='store_true')
     parser.set_defaults(do_flowmc=False)
@@ -132,9 +140,9 @@ if __name__ == "__main__":
     parser.add_argument('--rtol', type=float, default=1e-5)
     parser.add_argument('--atol', type=float, default=1e-5)
     parser.add_argument('--mxstep', type=float, default=100)
-    parser.add_argument('--flow_rtol', type=float, default=1e-5)
-    parser.add_argument('--flow_atol', type=float, default=1e-5)
-    parser.add_argument('--flow_mxstep', type=float, default=100)
+    # parser.add_argument('--flow_rtol', type=float, default=1e-5)
+    # parser.add_argument('--flow_atol', type=float, default=1e-5)
+    # parser.add_argument('--flow_mxstep', type=float, default=100)
 
     parser.add_argument('--lim', type=float, nargs=2, default=[-16, 16])
     parser.add_argument('--grid_width', type=int, default=400)

@@ -396,3 +396,132 @@ class FlatDistribution(Distribution):
 
     def sample_model(self, rng_key):
         pass
+
+
+class PhiFour(Distribution):
+    def __init__(self,
+        dim_grid, a=.1, b=0., beta=20., dim_phys=1,
+        bc=('dirichlet', 0),
+        tilt=None
+    ) -> None:
+        self.a = a
+        self.b = b
+        self.beta = beta
+        self.dim_grid = dim_grid
+        self.dim_phys = dim_phys
+        assert self.dim_phys < 3
+        self.sum_dims = tuple(i for i in range(dim_phys))
+
+        self.bc = bc
+        assert self.bc[0] == "dirichlet" or self.bc[0] == "pbc"
+        self.tilt = tilt
+
+    def reshape_to_dimphys(self, x):
+        if self.dim_phys == 2:
+            x_ = x.reshape(self.dim_grid, self.dim_grid)
+        else:
+            x_ = x
+        return x_
+    
+    def V(self, x):
+        coef = self.a * self.dim_grid
+        diffs = 1. - jnp.square(x)
+        V = jnp.dot(diffs, diffs) / 4 / coef
+        # V = ((1 - x ** 2) ** 2 / 4 + self.b * x).sum(self.sum_dims) / coef
+        if self.tilt is not None: 
+            tilt = (self.tilt['val'] - x.mean(self.sum_dims)) ** 2 
+            tilt = self.tilt["lambda"] * tilt / (4 * self.dim_grid)
+            V += tilt
+        return V
+    
+    def U(self, x):
+        x = self.reshape_to_dimphys(x)
+
+        if self.bc[0] == 'dirichlet':
+            x_ = jnp.pad(x, pad_width=1, mode='constant', constant_values=self.bc[1])
+        elif self.bc[0] == 'pbc':
+            x_ = jnp.pad(x, pad_width=(1, 0), mode='wrap')
+
+        if self.dim_phys == 2:
+            grad_x = ((x_[1:, :-1] - x_[:-1, :-1]) ** 2 / 2)
+            grad_y = ((x_[:-1, 1:] - x_[:-1, :-1]) ** 2 / 2)
+            grad_term = (grad_x + grad_y).sum(self.sum_dims)
+        elif self.dim_phys == 1:
+            diffs = x_[1:] - x_[:-1]
+            grad_term = jnp.dot(diffs, diffs) / 2
+            # grad_term = ((x_[1:] - x_[:-1]) ** 2 / 2).sum(self.sum_dims)
+        
+        coef = self.a * self.dim_grid
+        return grad_term * coef + self.V(x)
+
+    def logprob(self, x):
+        return -self.U(x) * self.beta
+    
+    def loglik(self, x):
+        return self.logprob(x)
+    
+    def logprior(self, x):
+        return 0.
+    
+    def initialize_model(self, rng_key, n_chain):
+        keys = jax.random.split(rng_key, n_chain)
+        self.init_params = jax.vmap(lambda k: jax.random.uniform(k, (self.dim_grid * self.dim_phys,)) * 2 - 1)(keys)
+        # self.init_params = jax.vmap(lambda k: jax.random.normal(k, (self.dim,)))(keys)
+
+
+class PhiFourBase(Distribution):
+    def __init__(self, 
+        dim, alpha=.1, beta=20., 
+        prior_type='coupled', dim_phys=1,
+    ):
+        # Build the prior
+        self.dim = dim
+        self.prior_type = prior_type
+
+        if prior_type == 'coupled':
+            self.beta_prior = beta
+            self.coef = alpha * dim
+            prec = jnp.eye(dim) * (3 * self.coef + 1 / self.coef)
+            prec -= self.coef * jnp.triu(jnp.triu(jnp.ones_like(prec), k=-1).T, k=-1)
+            prec = beta * prec
+
+        elif prior_type == 'coupled_pbc':
+            self.beta_prior = beta
+            dim_grid = dim / dim_phys
+            eps = 0.1
+            quadratic_coef = 4 + eps
+            sub_prec = (1 + quadratic_coef) * jnp.eye(dim_grid)
+            sub_prec -= jnp.triu(jnp.triu(jnp.ones_like(sub_prec), k=-1).T, k=-1)
+            sub_prec[0, -1] = - 1  # pbc
+            sub_prec[-1, 0] = - 1  # pbc
+
+            if dim_phys == 1:
+                prec = beta * sub_prec
+
+            elif dim_phys == 2:
+                # interation along one axis
+                prec = jax.scipy.linalg.block_diag(*(sub_prec for d in range(dim_grid)))
+                # interation along second axis
+                diags = jnp.triu(jnp.triu(jnp.ones_like(prec), k=-dim_grid).T, k=-dim_grid)
+                diags -= jnp.triu(jnp.triu(jnp.ones_like(prec), k=-dim_grid+1).T, k=-dim_grid+1)
+                prec -= diags
+                prec[:dim_grid, -dim_grid:] = - jnp.eye(dim_grid)  # pbc
+                prec[-dim_grid:, :dim_grid] = - jnp.eye(dim_grid)  # pbc
+                prec = beta * prec
+
+        self.prior_prec = prec
+        slogdet = jnp.linalg.slogdet(prec)
+        self.prior_log_det = - slogdet[0] * slogdet[1]
+        prec_chol = jax.scipy.linalg.cholesky(prec, lower=True)
+        self.prior_chol_cov = jax.scipy.linalg.solve_triangular(prec_chol, jnp.eye(dim), lower=True).T
+
+    def logprob(self, value):
+        prior_ll = - 0.5 * value @ self.prior_prec @ value
+        prior_ll -= 0.5 * (self.dim * jnp.log(2 * jnp.pi) + self.prior_log_det)
+        return prior_ll
+
+    def sample_model(self, rng_key):
+        return self.prior_chol_cov @ jax.random.normal(rng_key, (self.dim,))
+    
+    def initialize_model(self, rng_key, n_chain):
+        pass

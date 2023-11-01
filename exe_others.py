@@ -279,24 +279,43 @@ def run(dist, args, target_gn=None):
         columns.append("MMD*")
         print()
         
-    for i in range(args.dim - 1):
-        fig, ax = plt.subplots(1, 2, figsize=(11, 4))
-        ax[1].set_title(r"$\hat{\phi}$")
-        ax[1].set_xlabel(r"$x_1$")
-        ax[1].set_ylabel(r"$x_{-1}$")
-        sns.histplot(x=flow_samples[:, 0], y=flow_samples[:, i+1], ax=ax[1], bins=50)
-        ax[0].set_title(r"$\pi$")
-        ax[0].set_xlabel(r"$x_1$")
-        ax[0].set_ylabel(r"$x_{-1}$")
-        sns.histplot(x=exact_samples[:, 0], y=exact_samples[:, i+1], ax=ax[0], bins=50)
-        plt.setp(ax, xlim=args.lim, ylim=args.lim)
-        if args.dim == 2:
-            plot_contours(dist.logprob, ax, args)
-        data.append(wandb.Image(fig))
-        columns.append("plot (x0,x" + str(i+1) + ")")
-        plt.close()
-        if i > 8:
-            break #only the first 10 dimensions
+
+    fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+    ax[1].set_title(r"$\hat{\phi}$")
+    ax[1].set_xlabel(r"$d$")
+    ax[1].set_ylabel(r"$\phi$")
+    flow_samples = jnp.pad(flow_samples, ((0, 0), (1, 1))) #for the phi-four example
+    for i in range(flow_samples.shape[0]):
+        ax[1].plot(flow_samples[i], color='red', alpha=0.1)
+    ax[0].set_title(r"$\pi$")
+    ax[0].set_xlabel(r"$d$")
+    ax[0].set_ylabel(r"$\phi$")
+    exact_samples = jnp.pad(exact_samples, ((0, 0), (1, 1))) #for the phi-four example
+    for i in range(exact_samples.shape[0]):
+        ax[0].plot(exact_samples[i], color='red', alpha=0.1)
+    # plt.setp(ax, xlim=[0, args.dim + 1], ylim=args.lim)
+    data.append(wandb.Image(fig))
+    columns.append("plot phi")
+    plt.close()
+    
+    # for i in range(args.dim - 1):
+    #     fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+    #     ax[1].set_title(r"$\hat{\phi}$")
+    #     ax[1].set_xlabel(r"$x_1$")
+    #     ax[1].set_ylabel(r"$x_{-1}$")
+    #     sns.histplot(x=flow_samples[:, 0], y=flow_samples[:, i+1], ax=ax[1], bins=50)
+    #     ax[0].set_title(r"$\pi$")
+    #     ax[0].set_xlabel(r"$x_1$")
+    #     ax[0].set_ylabel(r"$x_{-1}$")
+    #     sns.histplot(x=exact_samples[:, 0], y=exact_samples[:, i+1], ax=ax[0], bins=50)
+    #     plt.setp(ax, xlim=args.lim, ylim=args.lim)
+    #     if args.dim == 2:
+    #         plot_contours(dist.logprob, ax, args)
+    #     data.append(wandb.Image(fig))
+    #     columns.append("plot (x0,x" + str(i+1) + ")")
+    #     plt.close()
+    #     if i > 8:
+    #         break #only the first 10 dimensions
 
     wandb.log({"summary": wandb.Table(columns, [data])})
     wandb.finish()
