@@ -400,72 +400,52 @@ class FlatDistribution(Distribution):
 
 class PhiFour(Distribution):
     def __init__(self,
-        dim_grid, a=.1, b=0., beta=20., dim_phys=1,
+        dim, a=.1, beta=20.,
         bc=('dirichlet', 0),
         tilt=None
     ) -> None:
         self.a = a
-        self.b = b
         self.beta = beta
-        self.dim_grid = dim_grid
-        self.dim_phys = dim_phys
-        assert self.dim_phys < 3
-        self.sum_dims = tuple(i for i in range(dim_phys))
+        self.dim = dim
 
         self.bc = bc
         assert self.bc[0] == "dirichlet" or self.bc[0] == "pbc"
         self.tilt = tilt
 
-    def reshape_to_dimphys(self, x):
-        if self.dim_phys == 2:
-            x_ = x.reshape(self.dim_grid, self.dim_grid)
-        else:
-            x_ = x
-        return x_
-    
     def V(self, x):
-        coef = self.a * self.dim_grid
+        coef = self.a * self.dim
         diffs = 1. - jnp.square(x)
         V = jnp.dot(diffs, diffs) / 4 / coef
-        # V = ((1 - x ** 2) ** 2 / 4 + self.b * x).sum(self.sum_dims) / coef
         if self.tilt is not None: 
             tilt = (self.tilt['val'] - x.mean(self.sum_dims)) ** 2 
-            tilt = self.tilt["lambda"] * tilt / (4 * self.dim_grid)
+            tilt = self.tilt["lambda"] * tilt / (4 * self.dim)
             V += tilt
         return V
     
     def U(self, x):
-        x = self.reshape_to_dimphys(x)
 
         if self.bc[0] == 'dirichlet':
             x_ = jnp.pad(x, pad_width=1, mode='constant', constant_values=self.bc[1])
         elif self.bc[0] == 'pbc':
             x_ = jnp.pad(x, pad_width=(1, 0), mode='wrap')
 
-        if self.dim_phys == 2:
-            grad_x = ((x_[1:, :-1] - x_[:-1, :-1]) ** 2 / 2)
-            grad_y = ((x_[:-1, 1:] - x_[:-1, :-1]) ** 2 / 2)
-            grad_term = (grad_x + grad_y).sum(self.sum_dims)
-        elif self.dim_phys == 1:
-            diffs = x_[1:] - x_[:-1]
-            grad_term = jnp.dot(diffs, diffs) / 2
-            # grad_term = ((x_[1:] - x_[:-1]) ** 2 / 2).sum(self.sum_dims)
-        
-        coef = self.a * self.dim_grid
-        return grad_term * coef + self.V(x)
+        diffs = x_[1:] - x_[:-1]
+        grad_term = jnp.dot(diffs, diffs) / 2
+        coef = self.a * self.dim
+        return grad_term * coef
 
     def logprob(self, x):
-        return -self.U(x) * self.beta
+        return self.loglik(x) + self.logprior(x)
     
     def loglik(self, x):
-        return self.logprob(x)
+        return -self.beta * (self.U(x) + self.V(x))
     
     def logprior(self, x):
         return 0.
     
     def initialize_model(self, rng_key, n_chain):
         keys = jax.random.split(rng_key, n_chain)
-        self.init_params = jax.vmap(lambda k: jax.random.uniform(k, (self.dim_grid * self.dim_phys,)) * 2 - 1)(keys)
+        self.init_params = jax.vmap(lambda k: jax.random.uniform(k, (self.dim,)) * 2 - 1)(keys)
         # self.init_params = jax.vmap(lambda k: jax.random.normal(k, (self.dim,)))(keys)
 
 

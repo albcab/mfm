@@ -11,6 +11,8 @@ from flax import struct, traverse_util
 from flax.training import train_state
 
 from jax.experimental.ode import odeint
+from diffrax import Tsit5, Dopri5, Heun, Kvaerno3, Kvaerno4, Kvaerno5
+from diffrax import diffeqsolve, ODETerm, SaveAt, PIDController
 
 import optax
 
@@ -323,6 +325,14 @@ def run(dist, args, target_gn=None):
     n_chain = args.num_chain
     key_target, key_sample, key_init, key_dist, key_fourier, key_gen = jax.random.split(jax.random.PRNGKey(args.seed), 6)
     dist.initialize_model(key_dist, n_chain)
+
+    # def odeintegrator(func, x0):
+    #     term = ODETerm(lambda t, y, args: func(y, t))
+    #     solver = Dopri5()
+    #     saveat = SaveAt(ts=[0., 1.])
+    #     stepsize_controller = PIDController(rtol=args.rtol, atol=args.atol)
+    #     return diffeqsolve(term, solver, t0=0, t1=1, dt0=None, y0=x0, saveat=saveat,
+    #                     stepsize_controller=stepsize_controller).ys
 
     odeintegrator = lambda func, x0: odeint(
         func, x0, 

@@ -12,7 +12,7 @@ from exe_others import run as run_others
 
 from jax.config import config
 # config.update("jax_debug_nans", True)
-# config.update("jax_enable_x64", True)
+config.update("jax_enable_x64", True)
 
 import wandb
 
@@ -95,19 +95,19 @@ if __name__ == "__main__":
 
     parser.add_argument("--ref_dist", type=str, default='stdgauss')
     parser.add_argument('--cond_flow', dest='cond_flow', action='store_true')
-    parser.set_defaults(cond_flow=False)
+    parser.set_defaults(cond_flow=False) #True
     parser.add_argument('--ot_cond_flow', dest='ot_cond_flow', action='store_true')
     parser.set_defaults(ot_cond_flow=False)
 
     parser.add_argument("--num_importance_samples", type=int, default=0)
     parser.add_argument("--mcmc_per_flow_steps", type=float, default=10)
-    parser.add_argument('--num_chain', type=int, default=16)
+    parser.add_argument('--num_chain', type=int, default=128) #16
     parser.add_argument("--learning_iter", type=int, default=400)
-    parser.add_argument("--eval_iter", type=int, default=100) #400
+    parser.add_argument("--eval_iter", type=int, default=10) #400
 
     parser.add_argument("--alpha", type=float, default=0.95)
     parser.add_argument("--anneal_iter", type=int, default=200)
-    parser.add_argument('--num_anneal_temp', type=int, default=10)
+    parser.add_argument('--num_anneal_temp', type=int, default=200) #10
 
     #defaults from PIS
     parser.add_argument('--non_linearity', type=str, default='relu')

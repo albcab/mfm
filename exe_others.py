@@ -155,10 +155,10 @@ def run(dist, args, target_gn=None):
         sampler = pc.Sampler(
             n_chain,
             args.dim,
-            lambda x: np.array(dist.loglik(x)),
-            lambda x: np.array(dist.logprior(x)),
-            vectorize_likelihood=True,
-            vectorize_prior=True,
+            lambda x: np.array(jax.vmap(dist.loglik)(x)),
+            lambda x: np.array(jax.vmap(dist.logprior)(x)),
+            vectorize_likelihood=False,
+            vectorize_prior=False,
             infer_vectorization=False,
             bounds=None,
             flow_config={'n_blocks': n_layers, 'hidden_size': args.hidden_xt[0], 'n_hidden': n_layers // 2, 'batch_norm': False, 'activation': args.non_linearity, 'input_order': 'sequential', 'flow_type': 'maf'},
@@ -203,8 +203,8 @@ def run(dist, args, target_gn=None):
         config.model.step_scheme_key = "cos_sq"
 
         config.model.input_dim = args.dim
-        config.trainer.lnpi = dist.logprob
-        config.model.target = dist.logprob
+        config.trainer.lnpi = lambda x: jax.vmap(dist.logprob)(x)
+        config.model.target = lambda x: jax.vmap(dist.logprob)(x)
         
         # Opt setting for funnel
         config.model.sigma = 1.075
