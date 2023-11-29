@@ -346,7 +346,7 @@ class GaussianMixture(Distribution):
         self.weights = weights
     
     def logprob(self, x):
-        pdfs = jax.vmap(lambda m, c, w: w * norm.pdf(x, m, c))(self.modes, self.chol_covs, self.weights)
+        pdfs = jax.vmap(lambda m, c, w: w * norm.pdf(x, m, c).prod())(self.modes, self.chol_covs, self.weights)
         # pdfs = jax.vmap(lambda m, c, w: w * multivariate_normal.pdf(x, m, c))(self.modes, self.covs, self.weights)
         return jnp.log(pdfs.sum())
     

@@ -329,14 +329,14 @@ def run(dist, args, target_gn=None):
     # def odeintegrator(func, x0):
     #     term = ODETerm(lambda t, y, args: func(y, t))
     #     solver = Dopri5()
-    #     saveat = SaveAt(ts=[0., 1.])
+    #     saveat = SaveAt(ts=[0., 0.25, 0.5, 0.75, 1.])
     #     stepsize_controller = PIDController(rtol=args.rtol, atol=args.atol)
     #     return diffeqsolve(term, solver, t0=0, t1=1, dt0=None, y0=x0, saveat=saveat,
     #                     stepsize_controller=stepsize_controller).ys
 
     odeintegrator = lambda func, x0: odeint(
         func, x0, 
-        jnp.linspace(0.0, 1.0, 2), 
+        jnp.linspace(0.0, 1.0, 5), 
         rtol=args.rtol, atol=args.atol, 
         mxstep=args.mxstep)
     fourier_random = args.fourier_std * jax.random.normal(key_fourier, (args.fourier_dim,))
@@ -466,42 +466,70 @@ def run(dist, args, target_gn=None):
         columns.append("MMD*")
         print()
 
-    fig, ax = plt.subplots(1, 2, figsize=(11, 4), sharex=True, sharey=True)
-    ax[1].set_title(r"$\hat{\phi}$")
-    ax[1].set_xlabel(r"$d$")
-    ax[1].set_ylabel(r"$\phi$")
-    flow_samples = jnp.pad(flow_samples, ((0, 0), (1, 1))) #for the phi-four example
-    for i in range(flow_samples.shape[0]):
-        ax[1].plot(flow_samples[i], color='red', alpha=0.1)
-    ax[0].set_title(r"$\pi$")
-    ax[0].set_xlabel(r"$d$")
-    ax[0].set_ylabel(r"$\phi$")
-    exact_samples = jnp.pad(exact_samples, ((0, 0), (1, 1))) #for the phi-four example
-    for i in range(exact_samples.shape[0]):
-        ax[0].plot(exact_samples[i], color='red', alpha=0.1)
-    # plt.setp(ax, xlim=[0, args.dim + 1], ylim=args.lim)
-    data.append(wandb.Image(fig))
-    columns.append("plot phi")
-    plt.close()
+    # #fields
+    # fig, ax = plt.subplots(1, 2, figsize=(11, 4), sharex=True, sharey=True)
+    # ax[1].set_title(r"$\hat{\phi}$")
+    # ax[1].set_xlabel(r"$d$")
+    # ax[1].set_ylabel(r"$\phi$")
+    # flow_samples = jnp.pad(flow_samples, ((0, 0), (1, 1))) #for the phi-four example
+    # for i in range(flow_samples.shape[0]):
+    #     ax[1].plot(flow_samples[i], color='red', alpha=0.1)
+    # ax[0].set_title(r"$\pi$")
+    # ax[0].set_xlabel(r"$d$")
+    # ax[0].set_ylabel(r"$\phi$")
+    # exact_samples = jnp.pad(exact_samples, ((0, 0), (1, 1))) #for the phi-four example
+    # for i in range(exact_samples.shape[0]):
+    #     ax[0].plot(exact_samples[i], color='red', alpha=0.1)
+    # # plt.setp(ax, xlim=[0, args.dim + 1], ylim=args.lim)
+    # data.append(wandb.Image(fig))
+    # columns.append("plot phi")
+    # plt.close()
     
-    # for i in range(args.dim - 1):
-    #     fig, ax = plt.subplots(1, 2, figsize=(11, 4))
-    #     ax[1].set_title(r"$\hat{\phi}$")
-    #     ax[1].set_xlabel(r"$x_1$")
-    #     ax[1].set_ylabel(r"$x_{-1}$")
-    #     sns.histplot(x=flow_samples[:, 0], y=flow_samples[:, i+1], ax=ax[1], bins=50)
-    #     ax[0].set_title(r"$\pi$")
-    #     ax[0].set_xlabel(r"$x_1$")
-    #     ax[0].set_ylabel(r"$x_{-1}$")
-    #     sns.histplot(x=exact_samples[:, 0], y=exact_samples[:, i+1], ax=ax[0], bins=50)
-    #     plt.setp(ax, xlim=args.lim, ylim=args.lim)
-    #     if args.dim == 2:
-    #         plot_contours(dist.logprob, ax, args)
-    #     data.append(wandb.Image(fig))
-    #     columns.append("plot (x0,x" + str(i+1) + ")")
-    #     plt.close()
-    #     if i > 8:
-    #         break #only the first 10 dimensions
+    #mixtures
+    for i in range(args.dim - 1):
+        fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+        ax[1].set_title(r"$\hat{\phi}$")
+        ax[1].set_xlabel(r"$x_1$")
+        ax[1].set_ylabel(r"$x_{-1}$")
+        # sns.histplot(x=flow_samples[:, 0], y=flow_samples[:, i+1], ax=ax[1], bins=50)
+        ax[1].plot(flow_samples[:, 0], flow_samples[:, i+1], '.', alpha=.2, color="blue")
+        ax[0].set_title(r"$\pi$")
+        ax[0].set_xlabel(r"$x_1$")
+        ax[0].set_ylabel(r"$x_{-1}$")
+        # sns.histplot(x=exact_samples[:, 0], y=exact_samples[:, i+1], ax=ax[0], bins=50)
+        ax[0].plot(exact_samples[:, 0], exact_samples[:, i+1], '.', alpha=.2, color="blue")
+        plt.setp(ax, xlim=args.lim, ylim=args.lim)
+        if args.dim == 2:
+            plot_contours(dist.logprob, ax, args)
+        data.append(wandb.Image(fig))
+        columns.append("plot (x0,x" + str(i+1) + ")")
+        plt.close()
+        if i > 8:
+            break #only the first 10 dimensions
+
+    #4-mode mixture
+    flow = lambda u: odeintegrator(lambda u, t: state.apply_fn(state.params, u, t), u)
+    flow_inv = lambda x: odeintegrator(lambda x, t: -state.apply_fn(state.params, x, 1-t), x)
+    forward_prog = jax.vmap(flow)(u)
+    n_col = forward_prog.shape[1]
+    fig, ax = plt.subplots(1, n_col, figsize=(25, 3))
+    for i in range(n_col):
+        ax[i].plot(forward_prog[:, i, 0], forward_prog[:, i, 1], '.', alpha=.2, color="blue")
+    data.append(wandb.Image(fig))
+    columns.append("forward progression")
+    plt.close()
+    fig, ax = plt.subplots(1, n_col, figsize=(25, 3))
+    mode_chains = n_chain // 4
+    colors = ['red', 'blue', 'green', 'yellow']
+    for j in range(4):
+        keys_mode = keys_target[j * (n_iter * mode_chains):(j + 1) * (n_iter * mode_chains)]
+        mode_u = jax.vmap(lambda k: dist.modes[j] + dist.chol_covs[j] * jax.random.normal(k, (args.dim,)))(keys_mode)
+        backward_prog = jax.vmap(flow_inv)(mode_u)
+        for i in range(n_col):
+            ax[n_col - i - 1].plot(backward_prog[:, i, 0], backward_prog[:, i, 1], '.', alpha=.2, color=colors[j])
+    data.append(wandb.Image(fig))
+    columns.append("backwards progression")
+    plt.close()
 
     wandb.log({"summary": wandb.Table(columns, [data])})
     wandb.finish()

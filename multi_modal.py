@@ -71,6 +71,25 @@ def main(args):
         # args.ref_dist = "phifour"
         args.cond_flow = True
 
+    elif args.example == "4-mode":
+        print("Setting up 4-mode Gaussian mixture density...")
+        args.dim = 2
+        args.fourier_dim = 64
+        args.num_chain = 16
+        args.eval_iter = 400
+        # args.lim = [-4, 4]
+        args.levels = 20
+        args.num_anneal_temp = 10
+        args.step_size = 0.1
+        args.hidden_x = args.hidden_t = args.hidden_xt = [64, 64]
+        modes = 8. * jnp.array([[1, 1], [1, -1], [-1, 1], [-1, -1]])
+        print("Modes=", modes)
+        covs = jnp.ones((4, args.dim))
+        print("Covs=", covs)
+        weights = jnp.ones(4) / 4
+        print("Weights=", weights)
+        dist = GaussianMixture(modes, covs, weights)
+
 
     print("Running algorithm...")
     if args.do_flowmc or args.do_pocomc or args.do_dds or args.do_smc:
@@ -85,7 +104,7 @@ if __name__ == "__main__":
     
     parser.add_argument('--dim', type=int, default=64) #2
     parser.add_argument('--num_modes', type=int, default=16)
-    parser.add_argument("--example", type=str, default="phi-four") #gaussian-mixture
+    parser.add_argument("--example", type=str, default="4-mode") #gaussian-mixture
 
     parser.add_argument("--sigma", type=float, default=1e-4)
     parser.add_argument("--fourier_dim", type=int, default=128) #64
