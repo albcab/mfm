@@ -60,6 +60,7 @@ class VectorFieldNet(nn.Module):
     hidden_t: list
     hidden_xt: list
     act_fn: Callable = jax.nn.relu
+    grad_clip: float = None
 
     @nn.compact
     def __call__(self, x, t):
@@ -75,6 +76,9 @@ class VectorFieldNet(nn.Module):
         signal_x = x
         for h in self.hidden_x:
             signal_x = self.act_fn(nn.Dense(h)(signal_x))
+        #add three more dense layers in nn_x
+        for _ in range(3):
+            signal_x = self.act_fn(nn.Dense(dim)(signal_x))
         #grad component
         nn_t = nn.Dense(dim, kernel_init=nn.initializers.zeros_init())(signal_t)
         #joint component
@@ -82,7 +86,10 @@ class VectorFieldNet(nn.Module):
         for h in self.hidden_xt:
             nn_xt = self.act_fn(nn.Dense(h)(nn_xt))
         nn_xt = nn.Dense(dim, kernel_init=nn.initializers.zeros_init())(nn_xt)
-        return nn_xt + nn_t * self.grad_logporob(x)
+        if self.grad_clip:
+            return nn_xt + nn_t * jnp.clip(self.grad_logporob(x), -self.grad_clip, self.grad_clip)
+        else:
+            return nn_xt + nn_t * self.grad_logporob(x)
 
 
 def create_train_state(
@@ -325,22 +332,23 @@ def run(dist, args, target_gn=None):
     n_chain = args.num_chain
     key_target, key_sample, key_init, key_dist, key_fourier, key_gen = jax.random.split(jax.random.PRNGKey(args.seed), 6)
     dist.initialize_model(key_dist, n_chain)
-
-    # def odeintegrator(func, x0):
-    #     term = ODETerm(lambda t, y, args: func(y, t))
-    #     solver = Dopri5()
-    #     saveat = SaveAt(ts=[0., 0.25, 0.5, 0.75, 1.])
-    #     stepsize_controller = PIDController(rtol=args.rtol, atol=args.atol)
-    #     return diffeqsolve(term, solver, t0=0, t1=1, dt0=None, y0=x0, saveat=saveat,
-    #                     stepsize_controller=stepsize_controller).ys
-
-    odeintegrator = lambda func, x0: odeint(
-        func, x0, 
-        jnp.linspace(0.0, 1.0, 5), 
-        rtol=args.rtol, atol=args.atol, 
-        mxstep=args.mxstep)
+    
+    if args.dim > 64:
+        def odeintegrator(func, x0):
+            term = ODETerm(lambda t, y, args: func(y, t))
+            solver = Dopri5()
+            saveat = SaveAt(ts=[0., 1.])
+            stepsize_controller = PIDController(rtol=args.rtol, atol=args.atol)
+            return diffeqsolve(term, solver, t0=0, t1=1, dt0=None, y0=x0, saveat=saveat,
+                            stepsize_controller=stepsize_controller).ys#, max_steps=None).ys
+    else:
+        odeintegrator = lambda func, x0: odeint(
+            func, x0, 
+            jnp.linspace(0.0, 1.0, 5 if args.example == "4-mode" else 2), 
+            rtol=args.rtol, atol=args.atol, 
+            mxstep=args.mxstep)
     fourier_random = args.fourier_std * jax.random.normal(key_fourier, (args.fourier_dim,))
-    model = VectorFieldNet(fourier_random, jax.grad(dist.logprob), args.hidden_x, args.hidden_t, args.hidden_xt, non_lins[args.non_linearity])
+    model = VectorFieldNet(fourier_random, jax.grad(dist.logprob), args.hidden_x, args.hidden_t, args.hidden_xt, non_lins[args.non_linearity], args.gradient_clip if args.dim > 64 else None)
     vector_field_param = model.init(key_init, dist.init_params[0], 0.)
 
     learning_rate_fn = create_learning_rate_fn(
@@ -414,7 +422,7 @@ def run(dist, args, target_gn=None):
         if beta < 1. and not use_real_samples:
             if count % (iter_per_temp + 1) == 0:
                 beta, _ = beta_fn(beta, mapped_loglik(train_states.position))
-                print("New beta=", beta)
+                # print("New beta=", beta)
                 train_states = init_fn(train_states.position, beta)
         train_states, infos = train_data_generator(key_train_gn, train_states, count, state.params, beta)
         state, train_metric = train_step(state, train_states.position, key_train_step)
@@ -426,29 +434,31 @@ def run(dist, args, target_gn=None):
         train_time = time.time() - train_start
         train_metric["train_time"] = train_time
         wandb.log(train_metric)
+    print("Final beta=", beta)
 
 
     u = sample_reference(key_gen)
     key_hutch, key_choice = jax.random.split(key_gen)
     flow_samples, vols = jax.vmap(lambda u: transform_and_logdet(key_hutch, u, state.params))(u)
     samples_logdensity = jax.vmap(dist.logprob)(flow_samples)
-    weights = jax.vmap(lambda logdensity, ref_sample, vol: jnp.exp(logdensity - ref_dist.logprob(ref_sample) - vol))(samples_logdensity, u, vols)
+    log_weights = jax.vmap(lambda logdensity, ref_sample, vol: logdensity - ref_dist.logprob(ref_sample) - vol)(samples_logdensity, u, vols)
+    weights = jnp.exp(log_weights - log_weights.max())
     exact_samples = jax.random.choice(key_choice, flow_samples, (n_iter * n_chain,), p=weights)
 
 
     if args.check:
-        print("Logpdf of real samples=", jax.vmap(dist.logprob)(real_samples).sum())
+        print("Logpdf of real samples=", jax.vmap(dist.logprob)(real_samples).mean())
         stein = stein_disc(real_samples, dist.logprob)
         print("Stein U, V disc of real samples=", stein[0], stein[1])
         mmd = max_mean_disc(real_samples, real_samples)
         print("Max mean disc of NF+MCMC samples=", mmd)
         print()
 
-    logpdf = jax.vmap(dist.logprob)(flow_samples).sum()
+    logpdf = jax.vmap(dist.logprob)(flow_samples).mean()
     print("Logpdf of flow samples=", logpdf)
     stein = stein_disc(flow_samples, dist.logprob)
     print("Stein U, V disc of flow samples=", stein[0], stein[1])
-    logpdf_ = jax.vmap(dist.logprob)(exact_samples).sum()
+    logpdf_ = jax.vmap(dist.logprob)(exact_samples).mean()
     print("Logpdf of exact samples=", logpdf_)
     stein_ = stein_disc(exact_samples, dist.logprob)
     print("Stein U, V disc of exact samples=", stein_[0], stein_[1])
@@ -465,25 +475,28 @@ def run(dist, args, target_gn=None):
         data.append(mmd_)
         columns.append("MMD*")
         print()
+    else:
+        mmd = mmd_ = 0.
 
-    # #fields
-    # fig, ax = plt.subplots(1, 2, figsize=(11, 4), sharex=True, sharey=True)
-    # ax[1].set_title(r"$\hat{\phi}$")
-    # ax[1].set_xlabel(r"$d$")
-    # ax[1].set_ylabel(r"$\phi$")
-    # flow_samples = jnp.pad(flow_samples, ((0, 0), (1, 1))) #for the phi-four example
-    # for i in range(flow_samples.shape[0]):
-    #     ax[1].plot(flow_samples[i], color='red', alpha=0.1)
-    # ax[0].set_title(r"$\pi$")
-    # ax[0].set_xlabel(r"$d$")
-    # ax[0].set_ylabel(r"$\phi$")
-    # exact_samples = jnp.pad(exact_samples, ((0, 0), (1, 1))) #for the phi-four example
-    # for i in range(exact_samples.shape[0]):
-    #     ax[0].plot(exact_samples[i], color='red', alpha=0.1)
-    # # plt.setp(ax, xlim=[0, args.dim + 1], ylim=args.lim)
-    # data.append(wandb.Image(fig))
-    # columns.append("plot phi")
-    # plt.close()
+    if args.example == "phi-four":
+        #fields
+        fig, ax = plt.subplots(1, 2, figsize=(11, 4), sharex=True, sharey=True)
+        ax[1].set_title(r"$\hat{\phi}$")
+        ax[1].set_xlabel(r"$d$")
+        ax[1].set_ylabel(r"$\phi$")
+        flow_samples = jnp.pad(flow_samples, ((0, 0), (1, 1))) #for the phi-four example
+        for i in range(flow_samples.shape[0]):
+            ax[1].plot(flow_samples[i], color='red', alpha=0.1)
+        ax[0].set_title(r"$\pi$")
+        ax[0].set_xlabel(r"$d$")
+        ax[0].set_ylabel(r"$\phi$")
+        exact_samples = jnp.pad(exact_samples, ((0, 0), (1, 1))) #for the phi-four example
+        for i in range(exact_samples.shape[0]):
+            ax[0].plot(exact_samples[i], color='red', alpha=0.1)
+        # plt.setp(ax, xlim=[0, args.dim + 1], ylim=args.lim)
+        data.append(wandb.Image(fig))
+        columns.append("plot phi")
+        plt.close()
     
     #mixtures
     for i in range(args.dim - 1):
@@ -498,7 +511,7 @@ def run(dist, args, target_gn=None):
         ax[0].set_ylabel(r"$x_{-1}$")
         # sns.histplot(x=exact_samples[:, 0], y=exact_samples[:, i+1], ax=ax[0], bins=50)
         ax[0].plot(exact_samples[:, 0], exact_samples[:, i+1], '.', alpha=.2, color="blue")
-        plt.setp(ax, xlim=args.lim, ylim=args.lim)
+        plt.setp(ax, xlim=args.lim or plt.xlim(), ylim=args.lim or plt.ylim())
         if args.dim == 2:
             plot_contours(dist.logprob, ax, args)
         data.append(wandb.Image(fig))
@@ -507,33 +520,34 @@ def run(dist, args, target_gn=None):
         if i > 8:
             break #only the first 10 dimensions
 
-    #4-mode mixture
-    flow = lambda u: odeintegrator(lambda u, t: state.apply_fn(state.params, u, t), u)
-    flow_inv = lambda x: odeintegrator(lambda x, t: -state.apply_fn(state.params, x, 1-t), x)
-    forward_prog = jax.vmap(flow)(u)
-    n_col = forward_prog.shape[1]
-    fig, ax = plt.subplots(1, n_col, figsize=(25, 3))
-    for i in range(n_col):
-        ax[i].plot(forward_prog[:, i, 0], forward_prog[:, i, 1], '.', alpha=.2, color="blue")
-    data.append(wandb.Image(fig))
-    columns.append("forward progression")
-    plt.close()
-    fig, ax = plt.subplots(1, n_col, figsize=(25, 3))
-    mode_chains = n_chain // 4
-    colors = ['red', 'blue', 'green', 'yellow']
-    for j in range(4):
-        keys_mode = keys_target[j * (n_iter * mode_chains):(j + 1) * (n_iter * mode_chains)]
-        mode_u = jax.vmap(lambda k: dist.modes[j] + dist.chol_covs[j] * jax.random.normal(k, (args.dim,)))(keys_mode)
-        backward_prog = jax.vmap(flow_inv)(mode_u)
+    if args.example == "4-mode":
+        #4-mode mixture
+        flow = lambda u: odeintegrator(lambda u, t: state.apply_fn(state.params, u, t), u)
+        flow_inv = lambda x: odeintegrator(lambda x, t: -state.apply_fn(state.params, x, 1-t), x)
+        forward_prog = jax.vmap(flow)(u)
+        n_col = forward_prog.shape[1]
+        fig, ax = plt.subplots(1, n_col, figsize=(25, 3))
         for i in range(n_col):
-            ax[n_col - i - 1].plot(backward_prog[:, i, 0], backward_prog[:, i, 1], '.', alpha=.2, color=colors[j])
-    data.append(wandb.Image(fig))
-    columns.append("backwards progression")
-    plt.close()
+            ax[i].plot(forward_prog[:, i, 0], forward_prog[:, i, 1], '.', alpha=.2, color="blue")
+        data.append(wandb.Image(fig))
+        columns.append("forward progression")
+        plt.close()
+        fig, ax = plt.subplots(1, n_col, figsize=(25, 3))
+        mode_chains = n_chain // 4
+        colors = ['red', 'blue', 'green', 'yellow']
+        for j in range(4):
+            keys_mode = keys_target[j * (n_iter * mode_chains):(j + 1) * (n_iter * mode_chains)]
+            mode_u = jax.vmap(lambda k: dist.modes[j] + dist.chol_covs[j] * jax.random.normal(k, (args.dim,)))(keys_mode)
+            backward_prog = jax.vmap(flow_inv)(mode_u)
+            for i in range(n_col):
+                ax[n_col - i - 1].plot(backward_prog[:, i, 0], backward_prog[:, i, 1], '.', alpha=.2, color=colors[j])
+        data.append(wandb.Image(fig))
+        columns.append("backwards progression")
+        plt.close()
 
     wandb.log({"summary": wandb.Table(columns, [data])})
     wandb.finish()
-    return None
+    return jnp.array([logpdf, stein[0], stein[1], mmd, train_time]), jnp.array([logpdf_, stein_[0], stein_[1], mmd_, train_time])
 
 import itertools
 def plot_contours(log_prob_func: Callable, ax: plt.Axes, args):

@@ -194,10 +194,9 @@ def run(dist, args, target_gn=None):
     elif args.do_dds:
         from dds.configs.config import set_task, get_config
         from dds.train_dds import train_dds
+        import sys, os
     
         config = get_config()
-        config.model.tfinal = 6.4
-        config.model.dt = 0.05
         config = set_task(config, "mixture_well")
         config.model.reference_process_key = "oudstl"
         config.model.step_scheme_key = "cos_sq"
@@ -205,26 +204,20 @@ def run(dist, args, target_gn=None):
         config.model.input_dim = args.dim
         config.trainer.lnpi = lambda x: jax.vmap(dist.logprob)(x)
         config.model.target = lambda x: jax.vmap(dist.logprob)(x)
-        
-        # Opt setting for funnel
-        config.model.sigma = 1.075
-        config.model.alpha = 0.6875
-        config.model.m = 1.0
             
-        # Path opt settings    
+        # Path opt settings
         config.model.exp_dds = True
 
         config.model.stl = False
         config.model.detach_stl_drift = False
 
-        # config.trainer.notebook = True
-        # config.trainer.epochs = 11000
+        config.trainer.notebook = False
         # Opt settings we use
-        # config.trainer.learning_rate = 0.0001
-        config.trainer.learning_rate = 5 * 10**(-3)
+        config.trainer.learning_rate = args.learning_rate
+        # config.trainer.learning_rate = 5 * 10**(-3) #learning_rate
         config.trainer.lr_sch_base_dec = 0.99 # For funnel
 
-        config.trainer.epochs = learning_iter #2500
+        config.trainer.epochs = learning_iter // 3 #2500
         config.trainer.random_seed = args.seed
         config.model.fully_connected_units = args.hidden_xt
         config.model.batch_size = n_chain #300  # 128
@@ -237,7 +230,6 @@ def run(dist, args, target_gn=None):
 
         name = "aug"
         print(out_dict[-1][name].shape)
-        # flow_samples = out_dict[-1]["aug_ode"][:, -1,:args.dim]
         flow_samples = out_dict[-1][name][:, -1, :args.dim]
         energy_cost_dt = out_dict[-1][name][:, -1, -1]
         stl = out_dict[-1][name][:, -1, args.dim]
@@ -250,18 +242,18 @@ def run(dist, args, target_gn=None):
 
     
     if args.check:
-        print("Logpdf of real samples=", jax.vmap(dist.logprob)(real_samples).sum())
+        print("Logpdf of real samples=", jax.vmap(dist.logprob)(real_samples).mean())
         stein = stein_disc(real_samples, dist.logprob_fn)
         print("Stein U, V disc of real samples=", stein[0], stein[1])
         mmd = max_mean_disc(real_samples, real_samples)
         print("Max mean disc of NF+MCMC samples=", mmd)
         print()
 
-    logpdf = jax.vmap(dist.logprob)(flow_samples).sum()
+    logpdf = jax.vmap(dist.logprob)(flow_samples).mean()
     print("Logpdf of flow samples=", logpdf)
     stein = stein_disc(flow_samples, dist.logprob)
     print("Stein U, V disc of flow samples=", stein[0], stein[1])
-    logpdf_ = jax.vmap(dist.logprob)(exact_samples).sum()
+    logpdf_ = jax.vmap(dist.logprob)(exact_samples).mean()
     print("Logpdf of exact samples=", logpdf_)
     stein_ = stein_disc(exact_samples, dist.logprob)
     print("Stein U, V disc of exact samples=", stein_[0], stein_[1])
@@ -278,25 +270,28 @@ def run(dist, args, target_gn=None):
         data.append(mmd_)
         columns.append("MMD*")
         print()
+    else:
+        mmd = mmd_ = 0.
         
-    # #fields
-    # fig, ax = plt.subplots(1, 2, figsize=(11, 4))
-    # ax[1].set_title(r"$\hat{\phi}$")
-    # ax[1].set_xlabel(r"$d$")
-    # ax[1].set_ylabel(r"$\phi$")
-    # flow_samples = jnp.pad(flow_samples, ((0, 0), (1, 1))) #for the phi-four example
-    # for i in range(flow_samples.shape[0]):
-    #     ax[1].plot(flow_samples[i], color='red', alpha=0.1)
-    # ax[0].set_title(r"$\pi$")
-    # ax[0].set_xlabel(r"$d$")
-    # ax[0].set_ylabel(r"$\phi$")
-    # exact_samples = jnp.pad(exact_samples, ((0, 0), (1, 1))) #for the phi-four example
-    # for i in range(exact_samples.shape[0]):
-    #     ax[0].plot(exact_samples[i], color='red', alpha=0.1)
-    # # plt.setp(ax, xlim=[0, args.dim + 1], ylim=args.lim)
-    # data.append(wandb.Image(fig))
-    # columns.append("plot phi")
-    # plt.close()
+    if args.example == "phi-four":
+        #fields
+        fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+        ax[1].set_title(r"$\hat{\phi}$")
+        ax[1].set_xlabel(r"$d$")
+        ax[1].set_ylabel(r"$\phi$")
+        flow_samples = jnp.pad(flow_samples, ((0, 0), (1, 1))) #for the phi-four example
+        for i in range(flow_samples.shape[0]):
+            ax[1].plot(flow_samples[i], color='red', alpha=0.1)
+        ax[0].set_title(r"$\pi$")
+        ax[0].set_xlabel(r"$d$")
+        ax[0].set_ylabel(r"$\phi$")
+        exact_samples = jnp.pad(exact_samples, ((0, 0), (1, 1))) #for the phi-four example
+        for i in range(exact_samples.shape[0]):
+            ax[0].plot(exact_samples[i], color='red', alpha=0.1)
+        # plt.setp(ax, xlim=[0, args.dim + 1], ylim=args.lim)
+        data.append(wandb.Image(fig))
+        columns.append("plot phi")
+        plt.close()
     
     #mixtures
     for i in range(args.dim - 1):
@@ -322,4 +317,4 @@ def run(dist, args, target_gn=None):
 
     wandb.log({"summary": wandb.Table(columns, [data])})
     wandb.finish()
-    return None
+    return jnp.array([logpdf, stein[0], stein[1], mmd, train_time]), jnp.array([logpdf_, stein_[0], stein_[1], mmd_, train_time])
