@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from blackjax.types import PyTree
+from bblackjax.types import PyTree
 
 
 class COCOBOptimizer(NamedTuple):

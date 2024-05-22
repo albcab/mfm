@@ -6,9 +6,9 @@ import jax.numpy as jnp
 import optax
 from jax.flatten_util import ravel_pytree
 
-from blackjax.base import SamplingAlgorithm
-from blackjax.optimizers.cocob import cocob
-from blackjax.types import PyTree
+from bblackjax.base import SamplingAlgorithm
+from bblackjax.optimizers.cocob import cocob
+from bblackjax.types import PyTree
 
 __all__ = ["svgd", "coin_svgd", "rbf_kernel", "update_median_heuristic"]
 

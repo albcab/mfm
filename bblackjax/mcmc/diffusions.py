@@ -4,8 +4,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from blackjax.types import PyTree
-from blackjax.util import generate_gaussian_noise
+from bblackjax.types import PyTree
+from bblackjax.util import generate_gaussian_noise
 
 __all__ = ["overdamped_langevin"]
 

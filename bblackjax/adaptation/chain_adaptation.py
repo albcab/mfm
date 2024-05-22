@@ -5,7 +5,7 @@ from typing import Callable, NamedTuple, Tuple, Union
 import jax
 import jax.numpy as jnp
 
-from blackjax.types import PRNGKey, PyTree
+from bblackjax.types import PRNGKey, PyTree
 
 
 class ChainState(NamedTuple):

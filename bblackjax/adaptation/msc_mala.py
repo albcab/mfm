@@ -5,12 +5,12 @@ from typing import Callable
 import jax
 from jax.flatten_util import ravel_pytree
 
-from blackjax.adaptation.msc import base
-from blackjax.mcmc.mala import build_kernel, init
-from blackjax.adaptation.chain_adaptation import cross_chain, ChainState
-from blackjax.adaptation.atess import optimize
-from blackjax.base import AdaptationAlgorithm
-from blackjax.types import PyTree, PRNGKey
+from bblackjax.adaptation.msc import base
+from bblackjax.mcmc.mala import build_kernel, init
+from bblackjax.adaptation.chain_adaptation import cross_chain, ChainState
+from bblackjax.adaptation.atess import optimize
+from bblackjax.base import AdaptationAlgorithm
+from bblackjax.types import PyTree, PRNGKey
 
 
 def msc_mala(

@@ -1,0 +1,38 @@
+defaults:
+  - fab: default
+  - flow: default
+  - training: default
+  - hydra: default
+  - _self_
+
+target:
+  num_grid_per_dim: 40  # [32 or 40]
+
+flow:
+  n_layers: 8
+  transform_type: spline # spline or real_nvp
+  conditioner_mlp_units: [512, 512] #[256, 256]
+  act_norm: false
+
+
+fab:
+  smc:
+    n_intermediate_distributions: 10
+    transition_operator: hmc # [hmc or metropolis]
+
+
+training:
+  # eval_batch_size: 32
+  # n_samples_log_Z: 1_000
+  n_epoch: 1e4
+  batch_size: 32
+
+
+logger:
+ list_logger: null
+#  pandas_logger:
+#    save_period: 1000 # how often to save the pandas dataframe as a csv
+  # wandb:
+  #   project: pines
+  #   job_type: FAB
+  #   group: dim=1600

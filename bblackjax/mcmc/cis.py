@@ -5,8 +5,8 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from blackjax.base import SamplingAlgorithm
-from blackjax.types import PRNGKey, PyTree, Array
+from bblackjax.base import SamplingAlgorithm
+from bblackjax.types import PRNGKey, PyTree, Array
 
 from jax.experimental.host_callback import id_print
 __all__ = ["CISState", "CISInfo", "init", "kernel"]

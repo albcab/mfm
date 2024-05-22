@@ -5,10 +5,10 @@ from typing import Callable, NamedTuple, Tuple
 import jax
 import jax.numpy as jnp
 
-import blackjax.mcmc.diffusions as diffusions
-import blackjax.mcmc.proposal as proposal
-from blackjax.base import SamplingAlgorithm
-from blackjax.types import PRNGKey, PyTree
+import bblackjax.mcmc.diffusions as diffusions
+import bblackjax.mcmc.proposal as proposal
+from bblackjax.base import SamplingAlgorithm
+from bblackjax.types import PRNGKey, PyTree
 
 __all__ = ["MALAState", "MALAInfo", "init", "build_kernel", "mala"]
 

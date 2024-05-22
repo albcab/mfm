@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import Callable
+from typing import Callable, List
 
 import jax
 import jax.numpy as jnp
@@ -16,22 +16,22 @@ from diffrax import diffeqsolve, ODETerm, SaveAt, PIDController
 
 import optax
 
-from ott.geometry import costs, pointcloud
-from ott.problems.linear import linear_problem
-from ott.solvers.linear import sinkhorn
+# from ott.geometry import costs, pointcloud
+# from ott.problems.linear import linear_problem
+# from ott.solvers.linear import sinkhorn
 
 from jaxopt import Bisection
 
 import wandb
 from tqdm import tqdm
 
-from blackjax.mcmc.mala import init, build_kernel, MALAState, MALAInfo
+from bblackjax.mcmc.mala import init, build_kernel, MALAState, MALAInfo
 from mcmc_utils import stein_disc, max_mean_disc
 
 from distributions import GaussianMixture, IndepGaussian, FlatDistribution, PhiFourBase
 
 import matplotlib.pyplot as plt
-import seaborn as sns
+# import seaborn as sns
 
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ non_lins = {
     'tanh': jax.nn.tanh,
     'elu': jax.nn.elu,
     'relu': jax.nn.relu,
+    'gelu': jax.nn.gelu,
     'swish': jax.nn.swish,
 }
 
@@ -76,9 +77,6 @@ class VectorFieldNet(nn.Module):
         signal_x = x
         for h in self.hidden_x:
             signal_x = self.act_fn(nn.Dense(h)(signal_x))
-        #add three more dense layers in nn_x
-        for _ in range(3):
-            signal_x = self.act_fn(nn.Dense(dim)(signal_x))
         #grad component
         nn_t = nn.Dense(dim, kernel_init=nn.initializers.zeros_init())(signal_t)
         #joint component
@@ -183,7 +181,7 @@ def create_train_state(
     return TrainState.create(
         apply_fn=vector_field_apply,
         params=vector_field_param,
-        tx=optax.chain(tx, clipper),
+        tx=optax.apply_if_finite(optax.chain(tx, clipper), 10),
         loss_fn=flow_matching_loss,
     )
 
@@ -301,6 +299,7 @@ def create_train_data_gn(dist,
 
     def train_data_generator(rng_key, states, count, vector_field_param, beta=1., **vector_field_kwargs):
         logprob = lambda position: beta * dist.loglik(position) + dist.logprior(position)
+        # logprob = lambda position: beta * dist.logprob(position) + (1 - beta) * ref_dist.logprob(position)
         keys = jax.random.split(rng_key, batch_size)
         if args.mcmc_per_flow_steps > 0 and args.mcmc_per_flow_steps < 1:
             flow_per_mcmc_steps = int(1 / args.mcmc_per_flow_steps)
@@ -315,6 +314,7 @@ def create_train_data_gn(dist,
                 operand=None)
 
     init_fn = lambda init_positions, beta=1.: jax.vmap(init, (0, None))(init_positions, lambda position: beta * dist.loglik(position) + dist.logprior(position))
+    # init_fn = lambda init_positions, beta=1.: jax.vmap(init, (0, None))(init_positions, lambda position: beta * dist.logprob(position) + (1 - beta) * ref_dist.logprob(position))
     return train_data_generator, init_fn, transform_and_logdet
 
 
@@ -333,22 +333,23 @@ def run(dist, args, target_gn=None):
     key_target, key_sample, key_init, key_dist, key_fourier, key_gen = jax.random.split(jax.random.PRNGKey(args.seed), 6)
     dist.initialize_model(key_dist, n_chain)
     
-    if args.dim > 64:
-        def odeintegrator(func, x0):
-            term = ODETerm(lambda t, y, args: func(y, t))
-            solver = Dopri5()
-            saveat = SaveAt(ts=[0., 1.])
-            stepsize_controller = PIDController(rtol=args.rtol, atol=args.atol)
-            return diffeqsolve(term, solver, t0=0, t1=1, dt0=None, y0=x0, saveat=saveat,
-                            stepsize_controller=stepsize_controller).ys#, max_steps=None).ys
-    else:
-        odeintegrator = lambda func, x0: odeint(
-            func, x0, 
-            jnp.linspace(0.0, 1.0, 5 if args.example == "4-mode" else 2), 
-            rtol=args.rtol, atol=args.atol, 
-            mxstep=args.mxstep)
+    # if args.dim > 64:
+    #     def odeintegrator(func, x0):
+    #         term = ODETerm(lambda t, y, args: func(y, t))
+    #         solver = Dopri5()
+    #         saveat = SaveAt(ts=[0., 1.])
+    #         stepsize_controller = PIDController(rtol=args.rtol, atol=args.atol)
+    #         return diffeqsolve(term, solver, t0=0, t1=1, dt0=None, y0=x0, saveat=saveat,
+    #                         stepsize_controller=stepsize_controller).ys#, max_steps=None).ys
+    # else:
+    odeintegrator = lambda func, x0: odeint(
+        func, x0, 
+        jnp.linspace(0.0, 1.0, 5 if args.example == "4-mode" else 2), 
+        rtol=args.rtol, atol=args.atol, 
+        mxstep=args.mxstep)
     fourier_random = args.fourier_std * jax.random.normal(key_fourier, (args.fourier_dim,))
-    model = VectorFieldNet(fourier_random, jax.grad(dist.logprob), args.hidden_x, args.hidden_t, args.hidden_xt, non_lins[args.non_linearity], args.gradient_clip if args.dim > 64 else None)
+    model = VectorFieldNet(fourier_random, jax.grad(dist.logprob), args.hidden_x, args.hidden_t, args.hidden_xt, non_lins[args.non_linearity], args.gradient_clip if args.dim > 128 else None)
+    # model = GaussianMixtureTransformer(fourier_random, jax.grad(dist.logprob), [128, 64, 32, 16], 16, 16, non_lins[args.non_linearity], args.gradient_clip if args.dim > 128 else None)
     vector_field_param = model.init(key_init, dist.init_params[0], 0.)
 
     learning_rate_fn = create_learning_rate_fn(
@@ -373,7 +374,8 @@ def run(dist, args, target_gn=None):
         eval_step = jax.jit(lambda state: state.loss_fn(key_loss, real_samples, state.params))
 
 
-    logger.info(f"===== Starting training ({learning_iter} iterations w/ {args.anneal_iter} annealing) =====")
+    logger.info(f"===== Starting training seed {args.seed} w/ {learning_iter} iterations =====")
+    logger.info("mcmc_per_flow_steps=" + str(args.mcmc_per_flow_steps) + ",learning_iter=" + str(args.learning_iter) + (",hutchs" if args.hutchs else ""))
 
     train_data_generator, init_fn, transform_and_logdet = create_train_data_gn(dist,
         model.apply, odeintegrator, args)
@@ -387,8 +389,10 @@ def run(dist, args, target_gn=None):
     sample_reference = lambda key: jax.vmap(ref_dist.sample_model)(jax.random.split(key, n_iter * n_chain))
 
     def beta_fn(prev_beta, logliks):
+    # def beta_fn(prev_beta, logprobs, reflogprobs):
         def ess_zero(beta):
             logw = logliks * (beta - prev_beta)
+            # logw = (logprobs - reflogprobs) * (beta - prev_beta)
             logw_max = jnp.max(logw)
             logw_normed = logw - logw_max
             weights = jnp.exp(logw_normed) / jnp.sum(jnp.exp(logw_normed))
@@ -396,20 +400,32 @@ def run(dist, args, target_gn=None):
         bisec = Bisection(optimality_fun=ess_zero, lower=prev_beta, upper=1., maxiter=30, tol=1e-5, check_bracket=False)
         beta = bisec.run().params
         return beta, logliks * (beta - prev_beta)
+        # return beta, (logprobs - reflogprobs) * (beta - prev_beta)
         
     # train_start = time.time() #pre jit
     train_data_generator = jax.jit(train_data_generator)
     init_fn = jax.jit(init_fn)
     train_step = jax.jit(train_step)
     beta_fn = jax.jit(beta_fn)
+    @jax.jit
+    def beta_gen(beta, train_states):
+        def new_beta(beta, train_states):
+            beta, _ = beta_fn(beta, mapped_loglik(train_states.position))
+            # beta, _ = beta_fn(beta, mapped_logprob(train_states.position), mapped_ref(train_states.position))
+            train_states = init_fn(train_states.position, beta)
+            return beta, train_states
+        return jax.lax.cond(beta < 1., new_beta, lambda b, ts: (b, ts), beta, train_states)
     mapped_loglik = jax.vmap(dist.loglik)
+    mapped_logprob = jax.vmap(dist.logprob)
+    mapped_ref = jax.vmap(ref_dist.logprob)
     train_start = time.time() #post jit
 
     # if args.anneal_iter > 0 and not use_real_samples:
     #     beta = args.anneal_temp.pop(0)
     if not use_real_samples:
         beta, _ = beta_fn(0., mapped_loglik(dist.init_params))
-        print("Initial beta=", beta)
+        # beta, _ = beta_fn(0., mapped_logprob(dist.init_params), mapped_ref(dist.init_params))
+        logger.info(f"Initial beta= {beta}")
     else:
         beta = 1.
     train_states = init_fn(dist.init_params, beta)
@@ -419,13 +435,10 @@ def run(dist, args, target_gn=None):
         #     if count % (iter_per_temp + 1) == 0:
         #         beta = args.anneal_temp.pop(0)
         #         train_states = init_fn(train_states.position, beta)
-        if beta < 1. and not use_real_samples:
-            if count % (iter_per_temp + 1) == 0:
-                beta, _ = beta_fn(beta, mapped_loglik(train_states.position))
-                # print("New beta=", beta)
-                train_states = init_fn(train_states.position, beta)
         train_states, infos = train_data_generator(key_train_gn, train_states, count, state.params, beta)
         state, train_metric = train_step(state, train_states.position, key_train_step)
+        if not use_real_samples and count % iter_per_temp == 0:
+            beta, train_states = beta_gen(beta, train_states)
         train_metric["acceptance avg."] = infos.acceptance_rate.mean()
         train_metric["acceptance std."] = infos.acceptance_rate.std()
         if target_gn is not None:
@@ -434,7 +447,7 @@ def run(dist, args, target_gn=None):
         train_time = time.time() - train_start
         train_metric["train_time"] = train_time
         wandb.log(train_metric)
-    print("Final beta=", beta)
+    logger.info(f"Final beta= {beta}")
 
 
     u = sample_reference(key_gen)
@@ -447,34 +460,32 @@ def run(dist, args, target_gn=None):
 
 
     if args.check:
-        print("Logpdf of real samples=", jax.vmap(dist.logprob)(real_samples).mean())
+        logger.info(f"Logpdf of real samples= {jax.vmap(dist.logprob)(real_samples).mean()}")
         stein = stein_disc(real_samples, dist.logprob)
-        print("Stein U, V disc of real samples=", stein[0], stein[1])
+        logger.info(f"Stein U, V disc of real samples= {stein[0]}, {stein[1]}")
         mmd = max_mean_disc(real_samples, real_samples)
-        print("Max mean disc of NF+MCMC samples=", mmd)
-        print()
+        logger.info(f"Max mean disc of NF+MCMC samples= {mmd}")
 
     logpdf = jax.vmap(dist.logprob)(flow_samples).mean()
-    print("Logpdf of flow samples=", logpdf)
+    logger.info(f"Logpdf of flow samples= {logpdf}")
     stein = stein_disc(flow_samples, dist.logprob)
-    print("Stein U, V disc of flow samples=", stein[0], stein[1])
+    logger.info(f"Stein U, V disc of flow samples= {stein[0]}, {stein[1]}")
     logpdf_ = jax.vmap(dist.logprob)(exact_samples).mean()
-    print("Logpdf of exact samples=", logpdf_)
+    logger.info(f"Logpdf of exact samples= {logpdf_}")
     stein_ = stein_disc(exact_samples, dist.logprob)
-    print("Stein U, V disc of exact samples=", stein_[0], stein_[1])
+    logger.info(f"Stein U, V disc of exact samples= {stein_[0]}, {stein_[1]}")
     data = [args.mcmc_per_flow_steps, args.learning_iter, train_time, logpdf, logpdf_, stein[0], stein_[0], stein[1], stein_[1]]
     columns = ["mcmc/flow", "learn iter", "train time", "logpdf", "logpdf*", "KSD U-stat", "KSD U-stat*", "KSD V-stat", "KSD V-stat*"]
 
     if target_gn is not None:
         mmd = max_mean_disc(real_samples, flow_samples)
-        print("Max mean disc of flow samples=", mmd)
+        logger.info(f"Max mean disc of flow samples= {mmd}")
         data.append(mmd)
         columns.append("MMD")
         mmd_ = max_mean_disc(real_samples, exact_samples)
-        print("Max mean disc of exact samples=", mmd_)
+        logger.info(f"Max mean disc of exact samples= {mmd_}")
         data.append(mmd_)
         columns.append("MMD*")
-        print()
     else:
         mmd = mmd_ = 0.
 
@@ -493,7 +504,7 @@ def run(dist, args, target_gn=None):
         exact_samples = jnp.pad(exact_samples, ((0, 0), (1, 1))) #for the phi-four example
         for i in range(exact_samples.shape[0]):
             ax[0].plot(exact_samples[i], color='red', alpha=0.1)
-        # plt.setp(ax, xlim=[0, args.dim + 1], ylim=args.lim)
+        plt.setp(ax, xlim=[0, args.dim + 1], ylim=args.lim)
         data.append(wandb.Image(fig))
         columns.append("plot phi")
         plt.close()

@@ -18,6 +18,26 @@ class Distribution(metaclass=abc.ABCMeta):
     def initialize_model(self, rng_key, n_chain):
         """defines the initialization of paramters"""
 
+    def log_prob(self, x):
+        if x.ndim == 1:
+            return self.logprob(x)
+        else:
+            assert x.ndim == 2
+        return jax.vmap(self.logprob)(x)
+
+    def sample(self, rng_key, n_samples):
+        keys = jax.random.split(rng_key, n_samples)
+        return jax.vmap(self.sample_model)(keys)
+    
+    def visualise(self, samples, axes):
+        return None
+    def evaluate(self, model_log_prob_fn, model_sample_and_log_prob_fn, key) -> dict:
+        """Evaluate a model. Note that reverse ESS will be estimated separately, so should not be estimated here."""
+        key1, key2 = jax.random.split(key)
+
+        info = {}
+        return info
+
     
 class GaussianMixture(Distribution):
     def __init__(self,
@@ -30,6 +50,10 @@ class GaussianMixture(Distribution):
         self.covs = covs
         self.chol_covs = jax.vmap(jnp.sqrt)(covs) #jax.vmap(jnp.linalg.cholesky)(covs)
         self.weights = weights
+        self.dim = 2
+        self.log_Z = 0.0
+        self.n_plots = 0
+        self.can_sample = False
     
     def logprob(self, x):
         pdfs = jax.vmap(lambda m, c, w: w * norm.pdf(x, m, c).prod())(self.modes, self.chol_covs, self.weights)
@@ -58,6 +82,9 @@ class IndepGaussian(Distribution):
         self.dim = dim
         self.std = jnp.sqrt(var)
         self.mean = mean
+        self.log_Z = 0.0
+        self.n_plots = 0
+        self.can_sample = False
 
     def logprob(self, x):
         return norm.logpdf(x, self.mean, self.std).sum()
@@ -93,6 +120,9 @@ class PhiFour(Distribution):
         self.a = a
         self.beta = beta
         self.dim = dim
+        self.log_Z = 0.0
+        self.n_plots = 0
+        self.can_sample = False
 
         self.bc = bc
         assert self.bc[0] == "dirichlet" or self.bc[0] == "pbc"
@@ -143,6 +173,9 @@ class PhiFourBase(Distribution):
         # Build the prior
         self.dim = dim
         self.prior_type = prior_type
+        self.log_Z = 0.0
+        self.n_plots = 0
+        self.can_sample = False
 
         if prior_type == 'coupled':
             self.beta_prior = beta
@@ -202,6 +235,10 @@ class LogGaussianCoxPines(Distribution):
         # Discretization is as in Controlled Sequential Monte Carlo
         # by Heng et al 2017 https://arxiv.org/abs/1708.08396
         num_dim = dim
+        self.dim = dim
+        self.log_Z = 0.0
+        self.n_plots = 0
+        self.can_sample = False
         self._num_latents = num_dim
         self._num_grid_per_dim = int(np.sqrt(num_dim))
 

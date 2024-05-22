@@ -6,10 +6,10 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from blackjax.mcmc.tess import build_kernel, init
-import blackjax.adaptation.chain_adaptation as chain_adaptation
-from blackjax.base import AdaptationAlgorithm
-from blackjax.types import PyTree, PRNGKey
+from bblackjax.mcmc.tess import build_kernel, init
+import bblackjax.adaptation.chain_adaptation as chain_adaptation
+from bblackjax.base import AdaptationAlgorithm
+from bblackjax.types import PyTree, PRNGKey
 
 
 def base(

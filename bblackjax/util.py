@@ -8,7 +8,7 @@ from jax.flatten_util import ravel_pytree
 from jax.random import normal
 from jax.tree_util import tree_leaves
 
-from blackjax.types import Array, PRNGKey, PyTree
+from bblackjax.types import Array, PRNGKey, PyTree
 
 
 @partial(jit, static_argnames=("precision",), inline=True)
