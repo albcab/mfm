@@ -1,0 +1,8 @@
+n_layers: 8
+conditioner_mlp_units: [128, 128]
+transform_type: real_nvp # spline or real_nvp
+act_norm: false # Set to true if using spline flow (especially if spline_max and spline_min are not known).
+identity_init: true
+spline_max:  10. # If using spline then it helps to have bounds to roughly match problem.
+spline_min: -10.
+spline_num_bins: 8

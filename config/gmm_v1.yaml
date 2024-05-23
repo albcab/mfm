@@ -1,0 +1,41 @@
+defaults:
+  - fab: default
+  - flow: default
+  - training: default
+  - hydra: default
+  - _self_
+
+target:
+  width_in_n_modes: 3
+
+fab:
+  smc:
+    n_intermediate_distributions: 2
+    spacing_type: linear
+    transition_operator: metropolis # [hmc or metropolis]
+    metropolis:
+      n_outer_steps: 1
+      init_step_size: 2.
+      target_p_accept: 0.65
+      tune_step_size: false # If false, then init_step_size needs to be reasonably good.
+
+flow:
+  n_layers: 4
+  transform_type: spline # spline or real_nvp
+  conditioner_mlp_units: [128, 128]
+  spline_max: 10. # If using spline then it helps to have bounds to roughly match problem.
+  spline_min: -10.
+  act_norm: true # Useful for spline flow.
+
+training:
+  # eval_batch_size: 20_000 # For reverse ESS calculation
+  # n_samples_log_Z: 2_000 # eval_batch_size will be split into multiple batches of size n_samples_log_Z.
+  n_epoch: 1000
+  batch_size: 256
+  
+logger:
+ list_logger: null
+  # wandb:
+  #   project: phi-four
+  #   job_type: FAB
+  #   group: dim=

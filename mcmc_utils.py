@@ -31,7 +31,7 @@ def stein_disc(X, logprob_fn, beta=-1/2) -> Tuple:
     returns U-Statistic (unbiased) and V-statistic (biased)
     """
 
-    X = jax.tree_map(lambda x: x.reshape((-1,) + x.shape[2:]), X)
+    # X = jax.tree_map(lambda x: x.reshape((-1,) + x.shape[2:]), X)
     if isinstance(X, dict):
         d = 0
         for name, x in X.items():
@@ -83,6 +83,32 @@ def stein_disc(X, logprob_fn, beta=-1/2) -> Tuple:
     # except RuntimeError:
     mc_sum = jax.lax.map(lambda x: _disc(x, X).sum(), X).sum()
     return (mc_sum - jax.vmap(lambda x: disc(x, x))(X).sum()) / (T * (T-1)), mc_sum / T**2
+
+
+def max_mean_disc(X, Y):
+    if isinstance(X, dict):
+        for name, x in X.items():
+            m = x.shape[0]
+            break
+        sub = lambda x, x_: ravel_pytree(x)[0] - ravel_pytree(x_)[0]
+    else: 
+        m = X.shape[0]
+        sub = lambda x, x_: x - x_
+
+    def kernel(x, y, sigma2=1.):
+        diff = sub(x, y)
+        return jnp.exp(-.5 * jnp.square(diff).sum() / sigma2)
+    # def kernel(x, y, beta=-.5):
+    #     diff = sub(x, y)
+    #     return (1 + jnp.square(diff).sum()) ** beta
+    
+    _disc = jax.vmap(kernel, (None, 0))
+    disc = jax.vmap(_disc, (0, None))
+    disc_x = disc(X, X).sum() - m
+    disc_y = disc(Y, Y).sum() - m
+    disc_xy = disc(X, Y).sum()
+    m2 = m * m
+    return disc_x / (m2 - m) - 2 * disc_xy / m2 + disc_y / (m2 - m) 
 
 
 def _fft_next_fast_len(target):

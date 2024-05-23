@@ -1,0 +1,33 @@
+defaults:
+  - fab: default
+  - flow: default
+  - training: default
+  - hydra: default
+  - _self_
+
+target:
+  dim: 64
+
+fab:
+  smc:
+    n_intermediate_distributions: 4
+    transition_operator: hmc # [hmc or metropolis]
+
+flow:
+  n_layers: 8
+  transform_type: spline # spline or real_nvp
+  conditioner_mlp_units: [128, 128]
+
+
+training:
+  # eval_batch_size: 1 # For reverse ESS calculation
+  # n_samples_log_Z: 1 # eval_batch_size will be split into multiple batches of size n_samples_log_Z.
+  n_epoch: 10000
+  batch_size: 128
+  
+logger:
+ list_logger: null
+  # wandb:
+  #   project: phi-four
+  #   job_type: FAB
+  #   group: dim=64
